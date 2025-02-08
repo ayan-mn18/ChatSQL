@@ -4,9 +4,8 @@ dotenv.config();
 import express from 'express';
 import morgan from 'morgan';
 
-
-import { sequelize } from './src/config/db';
 import { getQuery } from './src/service/openai';
+import { Sequelize } from 'sequelize';
 
 // Create an Express application
 const app = express();
@@ -18,12 +17,19 @@ const { PORT } = process.env;
 
 // Define a route for the root path ('/')
 app.post('/api/getQuery', async (req, res) => {
-  const {query} = req.body;
+  const {query, uri} = req.body;
 
-  const resp = await getQuery(query, "");
-
+  const resp = await getQuery(query, "", uri);
+  console.log("query: ", resp)
+  const sequelize = new Sequelize(uri);
+  if(resp == "" || resp == undefined) {
+    res.json({
+      "data": resp
+    })
+  }
+  const data = await sequelize.query(resp);
   res.json({
-    "data": resp
+    "data": data
   })
   
 });

@@ -2,6 +2,7 @@
 import OpenAI from "openai";
 import { generateTableMetaData } from "./generateDbMetaData";
 import { DbMetadata } from "../../types";
+import { callClaude } from "./anthropic";
 
 const apiKey = process.env.OPENAI_API_KEY;
 

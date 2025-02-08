@@ -12,6 +12,7 @@
   "author": "",
   "license": "ISC",
   "devDependencies": {
+    "@types/cors": "^2.8.17",
     "@types/express": "^5.0.0",
     "@types/morgan": "^1.9.9",
     "@types/node": "^22.13.1",
@@ -22,7 +23,9 @@
   },
   "dependencies": {
     "@ai-sdk/openai": "^1.1.9",
+    "@anthropic-ai/sdk": "^0.36.3",
     "ai": "^4.1.25",
+    "cors": "^2.8.5",
     "dotenv": "^16.4.7",
     "express": "^4.21.2",
     "morgan": "^1.10.0",

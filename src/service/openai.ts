@@ -51,7 +51,6 @@ export const getQuery = async (query: string, sys: string, uri: string) => {
   console.log("generating db meta....")
   const metaData = await generateTableMetaData(uri);
   const stringMetaData = JSON.stringify(metaData);
-  console.log("Db meta data generated: ", stringMetaData)
 
   console.log("Generating relevant metadata...")
   const relevantMetaData = await getRelevantMetaData(query, stringMetaData);
@@ -114,12 +113,7 @@ ${metaData}
 `;
 
 
-console.log("relevantMetaDataQuery: ", relevantMetaDataQuery)
-
-
   const response = await callOpenAi(relevantMetaDataQuery, "");
-
-  console.log("response from open api: ", response);
   return response;
 }
 

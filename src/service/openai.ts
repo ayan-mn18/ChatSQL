@@ -79,7 +79,7 @@ export const getQuery = async (query: string, sys: string, uri: string) => {
 
   
 
-  const rawQuery = await callOpenAi(queryPrompts, system+stringMetaData);
+  const rawQuery = await callClaude(queryPrompts, system+stringMetaData);
 
   return sanitizeSQ(rawQuery!);
 }
@@ -117,7 +117,7 @@ ${metaData}
 console.log("relevantMetaDataQuery: ", relevantMetaDataQuery)
 
 
-  const response = await callOpenAi(relevantMetaDataQuery, "");
+  const response = await callClaude(relevantMetaDataQuery, "");
 
   console.log("response from open api: ", response);
   return response;

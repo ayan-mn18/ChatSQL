@@ -76,6 +76,7 @@ export const getQuery = async (query: string, sys: string, uri: string) => {
   ### Expected Output:
   A single SQL query.
   `;
+
   
 
   const rawQuery = await callOpenAi(queryPrompts, system+stringMetaData);
@@ -113,7 +114,12 @@ ${metaData}
 `;
 
 
+console.log("relevantMetaDataQuery: ", relevantMetaDataQuery)
+
+
   const response = await callOpenAi(relevantMetaDataQuery, "");
+
+  console.log("response from open api: ", response);
   return response;
 }
 

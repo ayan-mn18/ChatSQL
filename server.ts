@@ -22,7 +22,7 @@ const { PORT } = process.env;
 // Define a route for the root path ('/')
 app.post('/api/getResult', async (req, res) => {
   try {
-    const {query, uri} = req.body;
+    const {query, uri, model} = req.body;
 
   const resp = await getQuery(query, "", uri);
   console.log("query: ", resp)
@@ -58,7 +58,7 @@ app.post('/api/testConnection', async (req, res) => {
       })
     }
     const conn = await testDbConnection(uri);
-    res.status(401).json({
+    res.status(200).json({
       "connection": conn
     })
   } catch (error) {

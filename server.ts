@@ -49,6 +49,37 @@ app.post('/api/getResult', async (req, res) => {
   
 });
 
+app.post('/api/testConnection', async (req, res) => {
+  try {
+    const { uri } = req.body;
+    if(!uri) {
+      res.status(401).json({
+        "connection": false
+      })
+    }
+    const conn = await testDbConnection(uri);
+    res.status(401).json({
+      "connection": conn
+    })
+  } catch (error) {
+    res.status(401).json({
+      "connection": false
+    })
+  }
+})
+
+async function testDbConnection(uri: string): Promise<boolean> {
+  const sequelize = new Sequelize(uri);
+  try {
+      await sequelize.authenticate();
+      await sequelize.close();
+      return true;
+  } catch (error) {
+      console.error('Database connection failed:', error);
+      return false;
+  }
+}
+
 // Start the server and listen on the specified port
 app.listen(PORT, () => {
   // Log a message when the server is successfully running

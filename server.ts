@@ -35,9 +35,10 @@ app.post('/api/getResult', async (req, res) => {
 
   const sequelize = new Sequelize(uri);
  
-  const data = await sequelize.query(resp);
+  const data = await sequelize.query(resp.query);
   res.status(200).json({
-    "data": data[0]
+    "data": data[0],
+    "info": resp
   })
   
   } catch (err) {

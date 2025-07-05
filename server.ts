@@ -1,11 +1,12 @@
 import dotenv from 'dotenv';
 dotenv.config();
 // Import the 'express' module
-import express from 'express';
+import express, { Request, Response } from 'express';
 import morgan from 'morgan';
 import cors from 'cors';
 
 import { getQuery } from './src/service/openai';
+import { getTables, getTableData } from './src/service/dataApiService';
 import { Sequelize } from 'sequelize';
 
 // Create an Express application
@@ -20,7 +21,7 @@ app.use(cors({
 const { PORT } = process.env;
 
 // Define a route for the root path ('/')
-app.post('/api/getResult', async (req, res) => {
+app.post('/api/getResult', async (req: Request, res: Response) => {
   try {
     const {query, uri, model} = req.body;
 
@@ -50,7 +51,139 @@ app.post('/api/getResult', async (req, res) => {
   
 });
 
-app.post('/api/testConnection', async (req, res) => {
+// New API endpoint to get database tables with metadata
+app.post('/api/getTables', async (req: Request, res: Response): Promise<void> => {
+  try {
+    const { uri } = req.body;
+    
+    if (!uri) {
+      res.status(400).json({ 
+        success: false, 
+        error: 'Database URI is required', 
+        code: 'INVALID_PARAMS' 
+      });
+      return;
+    }
+
+    const { tables, totalTables } = await getTables(uri);
+    
+    res.status(200).json({
+      success: true,
+      tables,
+      totalTables,
+      error: null,
+    });
+  } catch (err: any) {
+    console.error('Error fetching tables:', err);
+    
+    let errorCode = 'CONNECTION_ERROR';
+    if (err.message.includes('connect')) {
+      errorCode = 'CONNECTION_ERROR';
+    } else if (err.message.includes('authentication')) {
+      errorCode = 'AUTH_ERROR';
+    } else if (err.message.includes('timeout')) {
+      errorCode = 'TIMEOUT_ERROR';
+    }
+    
+    res.status(500).json({
+      success: false,
+      error: err.message || 'Failed to fetch tables',
+      code: errorCode,
+    });
+  }
+});
+
+// New API endpoint to get table data with pagination, filtering, and sorting
+app.post('/api/getTableData', async (req: Request, res: Response): Promise<void> => {
+  try {
+    const { 
+      uri, 
+      tableName, 
+      page = 1, 
+      pageSize = 10, 
+      sortBy, 
+      sortOrder = 'asc', 
+      filterValue, 
+      columns 
+    } = req.body;
+
+    if (!uri || !tableName) {
+      res.status(400).json({ 
+        success: false, 
+        error: 'URI and tableName are required', 
+        code: 'INVALID_PARAMS' 
+      });
+      return;
+    }
+
+    // Validate pagination parameters
+    if (page < 1) {
+      res.status(400).json({
+        success: false,
+        error: 'Page number must be greater than 0',
+        code: 'INVALID_PARAMS'
+      });
+      return;
+    }
+
+    if (pageSize < 1 || pageSize > 100) {
+      res.status(400).json({
+        success: false,
+        error: 'Page size must be between 1 and 100',
+        code: 'INVALID_PARAMS'
+      });
+      return;
+    }
+
+    // Validate sort order
+    if (sortOrder && !['asc', 'desc'].includes(sortOrder)) {
+      res.status(400).json({
+        success: false,
+        error: 'Sort order must be either "asc" or "desc"',
+        code: 'INVALID_PARAMS'
+      });
+      return;
+    }
+
+    const result = await getTableData(
+      uri, 
+      tableName, 
+      page, 
+      pageSize, 
+      sortBy, 
+      sortOrder, 
+      filterValue, 
+      columns
+    );
+
+    res.status(200).json({
+      success: true,
+      ...result,
+      error: null,
+    });
+  } catch (err: any) {
+    console.error('Error fetching table data:', err);
+    
+    let errorCode = 'QUERY_ERROR';
+    if (err.message.includes('not found')) {
+      errorCode = 'TABLE_NOT_FOUND';
+    } else if (err.message.includes('Invalid table name')) {
+      errorCode = 'INVALID_TABLE_NAME';
+    } else if (err.message.includes('Invalid columns')) {
+      errorCode = 'INVALID_COLUMNS';
+    } else if (err.message.includes('connect')) {
+      errorCode = 'CONNECTION_ERROR';
+    }
+    
+    res.status(500).json({
+      success: false,
+      error: err.message || 'Failed to fetch table data',
+      code: errorCode,
+    });
+  }
+});
+
+app.post('/api/testConnection', async (req: Request, res: Response) => {
   try {
     const { uri } = req.body;
     if(!uri) {
@@ -68,6 +201,15 @@ app.post('/api/testConnection', async (req, res) => {
     })
   }
 })
+
+// Health check endpoint
+app.get('/api/health', (req: Request, res: Response) => {
+  res.status(200).json({
+    status: 'OK',
+    timestamp: new Date().toISOString(),
+    service: 'ChatSQL API'
+  });
+});
 
 async function testDbConnection(uri: string): Promise<boolean> {
   const sequelize = new Sequelize(uri);

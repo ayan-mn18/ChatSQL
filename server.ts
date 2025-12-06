@@ -4,18 +4,29 @@ dotenv.config();
 import express, { Request, Response } from 'express';
 import morgan from 'morgan';
 import cors from 'cors';
+import cookieParser from 'cookie-parser';
 
 import { getQuery } from './src/service/openai';
 import { getTables, getTableData } from './src/service/dataApiService';
 import { Sequelize } from 'sequelize';
 
+// Import routes
+import { authRoutes } from './src/routes';
+
+// Import middleware
+import { errorHandler, notFoundHandler } from './src/middleware';
+
 // Create an Express application
 const app = express();
+
+// Middleware
 app.use(morgan('dev'));
-app.use(express.json())
+app.use(express.json());
+app.use(cookieParser());
 app.use(cors({
-  origin: "*"
-}))
+  origin: process.env.CORS_ORIGIN || "*",
+  credentials: true // Important for cookies
+}));
 
 // Set the port number for the server
 const { PORT } = process.env;
@@ -207,9 +218,25 @@ app.get('/api/health', (req: Request, res: Response) => {
   res.status(200).json({
     status: 'OK',
     timestamp: new Date().toISOString(),
-    service: 'ChatSQL API'
+    service: 'ChatSQL API',
+    version: '1.0.0'
   });
 });
+
+// ============================================
+// ROUTES
+// ============================================
+
+// Auth routes
+app.use('/api/auth', authRoutes);
+
+// Future routes - uncomment when implemented
+// app.use('/api/connections', connectionRoutes);
+// app.use('/api/query', queryRoutes);
+// app.use('/api/schema', schemaRoutes);
+// app.use('/api/data', dataRoutes);
+// app.use('/api/dashboards', dashboardRoutes);
+// app.use('/api/ai', aiRoutes);
 
 async function testDbConnection(uri: string): Promise<boolean> {
   const sequelize = new Sequelize(uri);
@@ -223,8 +250,13 @@ async function testDbConnection(uri: string): Promise<boolean> {
   }
 }
 
+// Error handling middleware (must be last)
+app.use(notFoundHandler);
+app.use(errorHandler);
+
 // Start the server and listen on the specified port
 app.listen(PORT, () => {
   // Log a message when the server is successfully running
-  console.log(`Server is running on http://localhost:${PORT}`);
+  console.log(`🚀 Server is running on http://localhost:${PORT}`);
+  console.log(`📚 Environment: ${process.env.NODE_ENV || 'development'}`);
 });

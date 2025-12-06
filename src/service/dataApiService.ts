@@ -1,11 +1,11 @@
 import { Sequelize, QueryTypes } from 'sequelize';
+import { TableInfo, ColumnInfo, PaginationInfo } from '../types';
 
-// Type mappings for database types to frontend types
-const typeMapping: { [key: string]: 'string' | 'number' | 'date' | 'boolean' } = {
+// Type mapping from database types to frontend types
+const typeMapping: Record<string, 'string' | 'number' | 'date' | 'boolean'> = {
   // Numbers
   'integer': 'number',
   'int': 'number',
-  'int2': 'number',
   'int4': 'number',
   'int8': 'number',
   'smallint': 'number',
@@ -14,7 +14,6 @@ const typeMapping: { [key: string]: 'string' | 'number' | 'date' | 'boolean' } =
   'numeric': 'number',
   'real': 'number',
   'double precision': 'number',
-  'double': 'number',
   'float': 'number',
   'float4': 'number',
   'float8': 'number',
@@ -32,6 +31,7 @@ const typeMapping: { [key: string]: 'string' | 'number' | 'date' | 'boolean' } =
   'json': 'string',
   'jsonb': 'string',
   'xml': 'string',
+  'citext': 'string',
 
   // Dates
   'timestamp': 'date',
@@ -48,88 +48,42 @@ const typeMapping: { [key: string]: 'string' | 'number' | 'date' | 'boolean' } =
   // Booleans
   'boolean': 'boolean',
   'bool': 'boolean',
-  'bit': 'boolean'
 };
 
-// Interface definitions
-export interface ColumnInfo {
-  key: string;
-  label: string;
-  type: 'string' | 'number' | 'date' | 'boolean';
-  dataType: string;
-  sortable: boolean;
-  isPrimaryKey?: boolean;
-  isNullable?: boolean;
-}
-
-export interface TableInfo {
-  id: string;
-  name: string;
-  description: string;
-  rowCount: number;
-  schema?: string;
-  columns: ColumnInfo[];
-}
-
-export interface GetTablesResponse {
-  success: boolean;
-  tables: TableInfo[];
-  totalTables: number;
-  error: string | null;
-}
-
-export interface PaginationInfo {
-  currentPage: number;
-  pageSize: number;
-  totalRecords: number;
-  totalPages: number;
-  hasNextPage: boolean;
-  hasPreviousPage: boolean;
-}
-
-export interface GetTableDataResponse {
-  success: boolean;
-  data: Record<string, any>[];
-  pagination: PaginationInfo;
-  columns: ColumnInfo[];
-  error: string | null;
-}
-
-// Helper function to map database types to frontend types
+/**
+ * Map database type to frontend type
+ */
 const getColumnType = (dataType: string): 'string' | 'number' | 'date' | 'boolean' => {
-  const normalizedType = dataType.toLowerCase().trim();
+  const normalizedType = dataType.toLowerCase();
   
   for (const [dbType, frontendType] of Object.entries(typeMapping)) {
-    if (normalizedType.includes(dbType.toLowerCase())) {
+    if (normalizedType.includes(dbType)) {
       return frontendType;
     }
   }
   
-  return 'string'; // Default to string if no match
+  return 'string'; // Default to string
 };
 
-// Helper function to validate and sanitize table/column names
-const sanitizeName = (name: string): string => {
-  // Remove any potential SQL injection characters and validate
-  return name.replace(/[^a-zA-Z0-9_]/g, '');
+/**
+ * Validate table/column name to prevent SQL injection
+ */
+const isValidIdentifier = (name: string): boolean => {
+  return /^[a-zA-Z_][a-zA-Z0-9_]*$/.test(name);
 };
 
+/**
+ * Get all tables with metadata from a PostgreSQL database
+ */
 export const getTables = async (uri: string): Promise<{ tables: TableInfo[]; totalTables: number }> => {
   const sequelize = new Sequelize(uri, { 
     logging: false,
     dialectOptions: {
-      connectTimeout: 60000,
-    },
-    pool: {
-      max: 5,
-      min: 0,
-      acquire: 30000,
-      idle: 10000
+      connectTimeout: 60000
     }
   });
 
   try {
-    // Test connection
     await sequelize.authenticate();
 
     // Get all tables with metadata from public schema only
@@ -147,9 +101,12 @@ export const getTables = async (uri: string): Promise<{ tables: TableInfo[]; tot
       ORDER BY t.table_name;
     `;
 
-    const tablesResult = await sequelize.query(tablesQuery, { 
-      type: QueryTypes.SELECT 
-    }) as any[];
+    const tablesResult = await sequelize.query<{
+      name: string;
+      schema: string;
+      description: string;
+      row_count: string;
+    }>(tablesQuery, { type: QueryTypes.SELECT });
 
     // Get columns for each table
     const tableInfoPromises = tablesResult.map(async (table) => {
@@ -157,40 +114,44 @@ export const getTables = async (uri: string): Promise<{ tables: TableInfo[]; tot
         SELECT 
           c.column_name as key,
           c.column_name as label,
-          c.data_type as data_type,
-          c.udt_name as udt_name,
-          CASE WHEN c.is_nullable = 'YES' THEN true ELSE false END as is_nullable,
-          CASE WHEN kcu.column_name IS NOT NULL THEN true ELSE false END as is_primary_key,
-          c.ordinal_position
+          c.data_type as "dataType",
+          c.is_nullable = 'YES' as "isNullable",
+          CASE WHEN pk.column_name IS NOT NULL THEN true ELSE false END as "isPrimaryKey"
         FROM information_schema.columns c
-        LEFT JOIN information_schema.key_column_usage kcu 
-          ON c.table_schema = kcu.table_schema 
-          AND c.table_name = kcu.table_name 
-          AND c.column_name = kcu.column_name
-        LEFT JOIN information_schema.table_constraints tc 
-          ON kcu.constraint_name = tc.constraint_name 
-          AND tc.constraint_type = 'PRIMARY KEY'
+        LEFT JOIN (
+          SELECT kcu.column_name, kcu.table_name, kcu.table_schema
+          FROM information_schema.key_column_usage kcu
+          JOIN information_schema.table_constraints tc 
+            ON kcu.constraint_name = tc.constraint_name 
+            AND kcu.table_schema = tc.table_schema
+          WHERE tc.constraint_type = 'PRIMARY KEY'
+        ) pk ON c.table_name = pk.table_name 
+          AND c.table_schema = pk.table_schema 
+          AND c.column_name = pk.column_name
         WHERE c.table_name = :tableName 
-          AND c.table_schema = :schemaName
+          AND c.table_schema = 'public'
         ORDER BY c.ordinal_position;
       `;
 
-      const columns = await sequelize.query(columnsQuery, {
-        replacements: { 
-          tableName: table.name, 
-          schemaName: table.schema 
-        },
-        type: QueryTypes.SELECT 
-      }) as any[];
+      const columns = await sequelize.query<{
+        key: string;
+        label: string;
+        dataType: string;
+        isNullable: boolean;
+        isPrimaryKey: boolean;
+      }>(columnsQuery, {
+        replacements: { tableName: table.name },
+        type: QueryTypes.SELECT
+      });
 
       const mappedColumns: ColumnInfo[] = columns.map(col => ({
         key: col.key,
         label: col.label,
-        type: getColumnType(col.udt_name || col.data_type),
-        dataType: col.udt_name || col.data_type,
+        type: getColumnType(col.dataType),
+        dataType: col.dataType,
         sortable: true,
-        isPrimaryKey: col.is_primary_key || false,
-        isNullable: col.is_nullable || false,
+        isPrimaryKey: col.isPrimaryKey,
+        isNullable: col.isNullable
       }));
 
       return {
@@ -214,6 +175,9 @@ export const getTables = async (uri: string): Promise<{ tables: TableInfo[]; tot
   }
 };
 
+/**
+ * Get paginated data from a table
+ */
 export const getTableData = async (
   uri: string,
   tableName: string,
@@ -228,136 +192,123 @@ export const getTableData = async (
   pagination: PaginationInfo;
   columns: ColumnInfo[];
 }> => {
+  // Validate table name
+  if (!isValidIdentifier(tableName)) {
+    throw new Error('Invalid table name');
+  }
+
   const sequelize = new Sequelize(uri, { 
     logging: false,
     dialectOptions: {
-      connectTimeout: 60000,
-    },
-    pool: {
-      max: 5,
-      min: 0,
-      acquire: 30000,
-      idle: 10000
+      connectTimeout: 60000
     }
   });
 
   try {
     await sequelize.authenticate();
 
-    // Validate and sanitize table name
-    const sanitizedTableName = sanitizeName(tableName);
-    if (!sanitizedTableName) {
-      throw new Error('Invalid table name');
-    }
-
-    // Get table schema information
-    const schemaQuery = `
+    // Get column info for the table
+    const columnsQuery = `
       SELECT 
-        column_name,
-        data_type,
-        udt_name,
-        is_nullable,
-        ordinal_position
+        column_name as key,
+        column_name as label,
+        data_type as "dataType",
+        is_nullable = 'YES' as "isNullable"
       FROM information_schema.columns 
       WHERE table_name = :tableName 
-        AND table_schema NOT IN ('pg_catalog', 'information_schema')
+        AND table_schema = 'public'
       ORDER BY ordinal_position;
     `;
 
-    const schemaResult = await sequelize.query(schemaQuery, {
-      replacements: { tableName: sanitizedTableName },
-      type: QueryTypes.SELECT 
-    }) as any[];
+    const allColumns = await sequelize.query<{
+      key: string;
+      label: string;
+      dataType: string;
+      isNullable: boolean;
+    }>(columnsQuery, {
+      replacements: { tableName },
+      type: QueryTypes.SELECT
+    });
 
-    if (schemaResult.length === 0) {
+    if (allColumns.length === 0) {
       throw new Error(`Table '${tableName}' not found`);
     }
 
-    const allColumnNames = schemaResult.map(col => col.column_name);
-    
-    // Validate sortBy column if provided
-    if (sortBy && !allColumnNames.includes(sortBy)) {
-      throw new Error(`Column '${sortBy}' not found in table '${tableName}'`);
-    }
+    const columnNames = allColumns.map(c => c.key);
 
-    // Validate columnsToFetch if provided
+    // Validate columns to fetch
     if (columnsToFetch && columnsToFetch.length > 0) {
-      const invalidColumns = columnsToFetch.filter(col => !allColumnNames.includes(col));
+      const invalidColumns = columnsToFetch.filter(c => !columnNames.includes(c));
       if (invalidColumns.length > 0) {
         throw new Error(`Invalid columns: ${invalidColumns.join(', ')}`);
       }
     }
 
-    const limit = Math.min(Math.max(pageSize, 1), 100); // Ensure pageSize is between 1 and 100
-    const offset = Math.max((page - 1) * limit, 0);
-
-    // Build WHERE clause for filtering
-    let whereClause = '';
-    const replacements: any = { limit, offset, tableName: sanitizedTableName };
-
-    if (filterValue && filterValue.trim()) {
-      const filterConditions = allColumnNames
-        .map(col => `CAST("${col}" AS TEXT) ILIKE :filterValue`)
-        .join(' OR ');
-      whereClause = `WHERE ${filterConditions}`;
-      replacements.filterValue = `%${filterValue.trim()}%`;
+    // Validate sort column
+    if (sortBy && !columnNames.includes(sortBy)) {
+      throw new Error(`Invalid sort column: ${sortBy}`);
     }
 
-    // Build ORDER BY clause
-    let orderClause = '';
-    if (sortBy && allColumnNames.includes(sortBy)) {
-      const sanitizedSortBy = sanitizeName(sortBy);
-      const sanitizedSortOrder = sortOrder === 'desc' ? 'DESC' : 'ASC';
-      orderClause = `ORDER BY "${sanitizedSortBy}" ${sanitizedSortOrder}`;
-    }
+    const limit = Math.min(pageSize, 100);
+    const offset = (page - 1) * limit;
 
-    // Build SELECT columns
+    // Build query parts
     const selectColumns = columnsToFetch && columnsToFetch.length > 0 
-      ? columnsToFetch.map(col => `"${sanitizeName(col)}"`).join(', ')
+      ? columnsToFetch.map(c => `"${c}"`).join(', ') 
       : '*';
 
-    // Execute data query
+    let whereClause = '';
+    const replacements: Record<string, any> = { limit, offset };
+
+    if (filterValue) {
+      const filterConditions = columnNames
+        .map((col, idx) => `CAST("${col}" AS TEXT) ILIKE :filterValue`)
+        .join(' OR ');
+      whereClause = `WHERE ${filterConditions}`;
+      replacements.filterValue = `%${filterValue}%`;
+    }
+
+    const orderClause = sortBy 
+      ? `ORDER BY "${sortBy}" ${sortOrder.toUpperCase()}` 
+      : '';
+
+    // Get data
     const dataQuery = `
       SELECT ${selectColumns} 
-      FROM "${sanitizedTableName}" 
+      FROM "${tableName}" 
       ${whereClause} 
       ${orderClause} 
       LIMIT :limit OFFSET :offset;
     `;
 
-    // Execute count query
+    // Get total count
     const countQuery = `
-      SELECT COUNT(*) as total 
-      FROM "${sanitizedTableName}" 
+      SELECT COUNT(*) as count 
+      FROM "${tableName}" 
       ${whereClause};
     `;
 
-    const [data, totalResult] = await Promise.all([
+    const [data, countResult] = await Promise.all([
       sequelize.query(dataQuery, { 
         replacements, 
         type: QueryTypes.SELECT 
       }),
-      sequelize.query(countQuery, { 
-        replacements: { 
-          ...replacements, 
-          limit: undefined, 
-          offset: undefined 
-        }, 
+      sequelize.query<{ count: string }>(countQuery, { 
+        replacements, 
         type: QueryTypes.SELECT 
       })
     ]);
 
-    const totalRecords = parseInt((totalResult[0] as any).total, 10);
+    const totalRecords = parseInt(countResult[0].count, 10);
     const totalPages = Math.ceil(totalRecords / limit);
 
-    // Map columns with type information
-    const columns: ColumnInfo[] = schemaResult.map(col => ({
-      key: col.column_name,
-      label: col.column_name,
-      type: getColumnType(col.udt_name || col.data_type),
-      dataType: col.udt_name || col.data_type,
+    const columns: ColumnInfo[] = allColumns.map(col => ({
+      key: col.key,
+      label: col.label,
+      type: getColumnType(col.dataType),
+      dataType: col.dataType,
       sortable: true,
-      isNullable: col.is_nullable === 'YES',
+      isNullable: col.isNullable
     }));
 
     return {

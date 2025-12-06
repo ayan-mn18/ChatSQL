@@ -1,0 +1,73 @@
+import dotenv from 'dotenv';
+import { z } from 'zod';
+
+// Load environment variables
+dotenv.config();
+
+// Environment variable schema
+const envSchema = z.object({
+  // Server
+  NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
+  PORT: z.string().transform(Number).default('3000'),
+  
+  // Database
+  DB_HOST: z.string().min(1, 'DB_HOST is required'),
+  DB_PORT: z.string().transform(Number).default('5432'),
+  DB_NAME: z.string().min(1, 'DB_NAME is required'),
+  DB_USERNM: z.string().min(1, 'DB_USERNM is required'),
+  DB_PWD: z.string().min(1, 'DB_PWD is required'),
+  
+  // JWT
+  JWT_SECRET: z.string().min(32, 'JWT_SECRET must be at least 32 characters'),
+  JWT_EXPIRES_IN: z.string().default('15m'),
+  REFRESH_TOKEN_EXPIRES_IN: z.string().default('7d'),
+  
+  // Redis (optional for now)
+  REDIS_URL: z.string().url().optional(),
+  
+  // AI Services (optional)
+  OPENAI_API_KEY: z.string().optional(),
+  ANTHROPIC_API_KEY: z.string().optional(),
+  
+  // CORS
+  CORS_ORIGIN: z.string().default('*'),
+});
+
+// Validate and export environment variables
+const parseEnv = () => {
+  try {
+    return envSchema.parse(process.env);
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      const missing = error.errors.map(e => `${e.path.join('.')}: ${e.message}`);
+      console.error('❌ Environment validation failed:');
+      missing.forEach(m => console.error(`   - ${m}`));
+      process.exit(1);
+    }
+    throw error;
+  }
+};
+
+export const env = parseEnv();
+
+// Export individual variables for convenience
+export const {
+  NODE_ENV,
+  PORT,
+  DB_HOST,
+  DB_PORT,
+  DB_NAME,
+  DB_USERNM,
+  DB_PWD,
+  JWT_SECRET,
+  JWT_EXPIRES_IN,
+  REFRESH_TOKEN_EXPIRES_IN,
+  REDIS_URL,
+  OPENAI_API_KEY,
+  ANTHROPIC_API_KEY,
+  CORS_ORIGIN
+} = env;
+
+export const isDevelopment = NODE_ENV === 'development';
+export const isProduction = NODE_ENV === 'production';
+export const isTest = NODE_ENV === 'test';

@@ -16,6 +16,7 @@ import { authRoutes } from './src/routes';
 
 // Import middleware
 import { errorHandler, notFoundHandler } from './src/middleware';
+import { env } from './src/config';
 
 // Create an Express application
 const app = express();
@@ -25,7 +26,7 @@ app.use(morgan('dev'));
 app.use(express.json());
 app.use(cookieParser());
 app.use(cors({
-  origin: process.env.CORS_ORIGIN || "https://sql.bizer.dev",
+  origin: env.CORS_ORIGIN || "https://sql.bizer.dev",
   credentials: true // Important for cookies
 }));
 

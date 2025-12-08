@@ -18,6 +18,8 @@ import { authRoutes } from './src/routes';
 import { errorHandler, notFoundHandler } from './src/middleware';
 import { corsConfig, env } from './src/config';
 
+import { logger } from './src/utils/logger';
+
 // Create an Express application
 const app = express();
 
@@ -36,7 +38,7 @@ app.post('/api/getResult', async (req: Request, res: Response) => {
     const {query, uri, model} = req.body;
 
   const resp = await getQuery(query, "", uri);
-  console.log("query: ", resp)
+  logger.info("query: ", resp)
 
   if(resp === "" || resp === undefined || resp === null) {
     res.json({
@@ -53,7 +55,7 @@ app.post('/api/getResult', async (req: Request, res: Response) => {
   })
   
   } catch (err) {
-    console.log(err);
+    logger.error("Error in getResult:", err);
     res.status(401).json({
       err: "Invalid Prompt"
     })
@@ -84,7 +86,7 @@ app.post('/api/getTables', async (req: Request, res: Response): Promise<void> =>
       error: null,
     });
   } catch (err: any) {
-    console.error('Error fetching tables:', err);
+    logger.error('Error fetching tables:', err);
     
     let errorCode = 'CONNECTION_ERROR';
     if (err.message.includes('connect')) {
@@ -172,7 +174,7 @@ app.post('/api/getTableData', async (req: Request, res: Response): Promise<void>
       error: null,
     });
   } catch (err: any) {
-    console.error('Error fetching table data:', err);
+    logger.error('Error fetching table data:', err);
     
     let errorCode = 'QUERY_ERROR';
     if (err.message.includes('not found')) {
@@ -244,7 +246,7 @@ async function testDbConnection(uri: string): Promise<boolean> {
       await sequelize.close();
       return true;
   } catch (error) {
-      console.error('Database connection failed:', error);
+      logger.error('Database connection failed:', error);
       return false;
   }
 }
@@ -256,8 +258,8 @@ app.use(errorHandler);
 // Start the server and listen on the specified port
 app.listen(PORT, async () => {
   // Log a message when the server is successfully running
-  console.log('Cors allowed for:', env.CORS_ORIGIN || "https://sql.bizer.dev");
-  console.log(`🚀 Server is running on http://localhost:${PORT}`);
-  console.log(`📚 Environment: ${env.NODE_ENV || 'development'}`);
+  logger.info('Cors allowed for:', env.CORS_ORIGIN || "https://sql.bizer.dev");
+  logger.info(`🚀 Server is running on http://localhost:${PORT}`);
+  logger.info(`📚 Environment: ${env.NODE_ENV || 'development'}`);
   await connectDatabase();
 });

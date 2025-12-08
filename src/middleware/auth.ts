@@ -1,6 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
 import { JWTPayload, UserPublic } from '../types';
+import { logger } from '../utils/logger';
 
 // Extend Express Request to include user
 declare global {
@@ -38,7 +39,7 @@ export const authenticate = async (
     }
 
     if (!JWT_SECRET) {
-      console.error('JWT_SECRET is not configured');
+      logger.error('JWT_SECRET is not configured');
       res.status(500).json({
         success: false,
         error: 'Server configuration error',
@@ -72,7 +73,7 @@ export const authenticate = async (
       return;
     }
 
-    console.error('Auth middleware error:', error);
+    logger.error('Auth middleware error:', error);
     res.status(500).json({
       success: false,
       error: 'Authentication failed',

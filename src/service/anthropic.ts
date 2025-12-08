@@ -1,4 +1,5 @@
 import Anthropic from "@anthropic-ai/sdk";
+import { logger } from "../utils/logger";
 
 const { ANTHROPIC_API_KEY } = process.env;
 const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY});
@@ -25,7 +26,7 @@ export const callClaude = async (query: string, sys: string) => {
     ]
     });
 
-    console.log(msg);
+    logger.info("Anthropic response:", msg);
     // @ts-ignore
     return msg.content[0].text;
 }

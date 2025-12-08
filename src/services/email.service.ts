@@ -1,5 +1,6 @@
 import nodemailer from 'nodemailer';
 import { Transporter } from 'nodemailer';
+import { logger } from '../utils/logger';
 
 // Email configuration from environment variables
 // Note: Using Brevo SMTP credentials from .env
@@ -70,10 +71,10 @@ export const sendVerificationEmail = async (
       html: template.html,
     });
     
-    console.log(`✅ [EMAIL] Verification OTP sent to ${email}`);
+    logger.info(`✅ [EMAIL] Verification OTP sent to ${email}`);
     return true;
   } catch (error) {
-    console.error(`❌ [EMAIL] Failed to send verification email to ${email}:`, error);
+    logger.error(`❌ [EMAIL] Failed to send verification email to ${email}:`, error);
     return false;
   }
 };
@@ -98,10 +99,10 @@ export const sendPasswordResetEmail = async (
       html: template.html,
     });
     
-    console.log(`✅ [EMAIL] Password reset email sent to ${email}`);
+    logger.info(`✅ [EMAIL] Password reset email sent to ${email}`);
     return true;
   } catch (error) {
-    console.error(`❌ [EMAIL] Failed to send password reset email to ${email}:`, error);
+    logger.error(`❌ [EMAIL] Failed to send password reset email to ${email}:`, error);
     return false;
   }
 };
@@ -125,10 +126,10 @@ export const sendWelcomeEmail = async (
       html: template.html,
     });
     
-    console.log(`✅ [EMAIL] Welcome email sent to ${email}`);
+    logger.info(`✅ [EMAIL] Welcome email sent to ${email}`);
     return true;
   } catch (error) {
-    console.error(`❌ [EMAIL] Failed to send welcome email to ${email}:`, error);
+    logger.error(`❌ [EMAIL] Failed to send welcome email to ${email}:`, error);
     return false;
   }
 };
@@ -140,10 +141,10 @@ export const verifySmtpConnection = async (): Promise<boolean> => {
   try {
     const transport = getTransporter();
     await transport.verify();
-    console.log('✅ SMTP connection verified');
+    logger.info('✅ SMTP connection verified');
     return true;
   } catch (error) {
-    console.error('❌ SMTP connection failed:', error);
+    logger.error('❌ SMTP connection failed:', error);
     return false;
   }
 };

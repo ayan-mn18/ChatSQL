@@ -3,6 +3,7 @@ import OpenAI from "openai";
 import { generateTableMetaData } from "./generateDbMetaData";
 import { DbMetadata } from "../../types";
 import { callClaude } from "./anthropic";
+import { logger } from "../utils/logger";
 
 const apiKey = process.env.OPENAI_API_KEY;
 
@@ -59,7 +60,7 @@ export const sanitizeResponse = (aiResponse: string) => {
     // No need to sanitize the SQL query further as it's already clean
     return data;
   } catch (e) {
-    console.error("Parse error:", e);
+    logger.error("Parse error:", e);
     return {
       query: "",
       reasoning: {
@@ -87,13 +88,13 @@ export const sanitizeSQ = (aiResponse: string) => {
 }
 
 export const getQuery = async (query: string, sys: string, uri: string) => {
-  console.log("generating db meta....")
+  logger.info("generating db meta....")
   const metaData = await generateTableMetaData(uri);
   const stringMetaData = JSON.stringify(metaData);
 
-  console.log("Generating relevant metadata...")
+  logger.info("Generating relevant metadata...")
   const relevantMetaData = await getRelevantMetaData(query, stringMetaData);
-  console.log("Relevant Metadata Generated: ", relevantMetaData);
+  logger.info("Relevant Metadata Generated: ", relevantMetaData);
 
   const queryPrompts = `
   ### Task:
@@ -129,7 +130,7 @@ export const getQuery = async (query: string, sys: string, uri: string) => {
   
 
   const rawResponse = await callOpenAi(queryPrompts, system+stringMetaData);
-  console.log("RawResponse: ", rawResponse)
+  logger.info("RawResponse: ", rawResponse)
 
   return sanitizeResponse(rawResponse!);
 }

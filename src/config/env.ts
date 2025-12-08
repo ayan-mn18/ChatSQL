@@ -1,6 +1,7 @@
 import dotenv from 'dotenv';
 import { z } from 'zod';
 import cors from 'cors';
+import { logger } from '../utils/logger';
 
 // Load environment variables
 dotenv.config();
@@ -41,8 +42,8 @@ const parseEnv = () => {
   } catch (error) {
     if (error instanceof z.ZodError) {
       const missing = error.errors.map(e => `${e.path.join('.')}: ${e.message}`);
-      console.error('❌ Environment validation failed:');
-      missing.forEach(m => console.error(`   - ${m}`));
+      logger.error('❌ Environment validation failed:');
+      missing.forEach(m => logger.error(`   - ${m}`));
       process.exit(1);
     }
     throw error;

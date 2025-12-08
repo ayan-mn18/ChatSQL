@@ -63,9 +63,11 @@ async function getTableRelationships(sequelize: Sequelize) {
 }
 
 
+import { logger } from "../utils/logger";
+
 export const generateTableMetaData = async (uri: string) => {
 
-  console.log("generating meta data...")
+  logger.info("generating meta data...")
   const sequelize = new Sequelize(uri, {logging: false});
   const tables  = await getTablesAndSchemas(sequelize);
   const relationships = await getTableRelationships(sequelize);

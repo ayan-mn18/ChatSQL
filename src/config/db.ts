@@ -1,4 +1,5 @@
 import { Sequelize } from "sequelize";
+import { logger } from "../utils/logger";
 
 const { DB_HOST, DB_PORT, DB_NAME, DB_USERNM, DB_PWD } = process.env;
 
@@ -24,9 +25,9 @@ export const sequelize = new Sequelize({
 export const connectDatabase = async (): Promise<void> => {
   try {
     await sequelize.authenticate();
-    console.log("✅ Database connection established successfully");
+    logger.info("✅ Database connection established successfully");
   } catch (error) {
-    console.error("❌ Unable to connect to the database:", error);
+    logger.error("❌ Unable to connect to the database:", error);
     process.exit(1);
   }
 };

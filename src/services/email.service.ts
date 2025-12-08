@@ -2,14 +2,13 @@ import nodemailer from 'nodemailer';
 import { Transporter } from 'nodemailer';
 
 // Email configuration from environment variables
-const {
-  SMTP_HOST,
-  SMTP_PORT,
-  SMTP_USER,
-  SMTP_PASS,
-  SMTP_FROM_EMAIL,
-  SMTP_FROM_NAME = 'ChatSQL'
-} = process.env;
+// Note: Using Brevo SMTP credentials from .env
+const SMTP_HOST = process.env['smtp.host'];
+const SMTP_PORT = process.env['smtp.port'];
+const SMTP_USER = process.env['smtp.login'];
+const SMTP_PASS = process.env['smtp.key'];
+const SMTP_FROM_EMAIL = process.env['smtp.from'] || 'no-reply@sql.bizer.dev';
+const SMTP_FROM_NAME = 'ChatSQL';
 
 // Create transporter instance
 let transporter: Transporter | null = null;
@@ -59,14 +58,24 @@ export const sendVerificationEmail = async (
   email: string,
   otp: string
 ): Promise<boolean> => {
-  // TODO: Implement email sending logic
-  // 1. Get transporter
-  // 2. Compose email with OTP template
-  // 3. Send email
-  // 4. Return success/failure
-
-  console.log(`[EMAIL SERVICE] Would send OTP ${otp} to ${email}`);
-  return true;
+  try {
+    const transport = getTransporter();
+    const template = emailTemplates.verificationOtp(otp);
+    
+    await transport.sendMail({
+      from: `"${SMTP_FROM_NAME}" <${SMTP_FROM_EMAIL}>`,
+      to: email,
+      subject: template.subject,
+      text: template.text,
+      html: template.html,
+    });
+    
+    console.log(`✅ [EMAIL] Verification OTP sent to ${email}`);
+    return true;
+  } catch (error) {
+    console.error(`❌ [EMAIL] Failed to send verification email to ${email}:`, error);
+    return false;
+  }
 };
 
 /**
@@ -77,14 +86,24 @@ export const sendPasswordResetEmail = async (
   resetToken: string,
   resetUrl: string
 ): Promise<boolean> => {
-  // TODO: Implement password reset email
-  // 1. Get transporter
-  // 2. Compose email with reset link
-  // 3. Send email
-  // 4. Return success/failure
-
-  console.log(`[EMAIL SERVICE] Would send password reset to ${email}`);
-  return true;
+  try {
+    const transport = getTransporter();
+    const template = emailTemplates.passwordReset(resetUrl);
+    
+    await transport.sendMail({
+      from: `"${SMTP_FROM_NAME}" <${SMTP_FROM_EMAIL}>`,
+      to: email,
+      subject: template.subject,
+      text: template.text,
+      html: template.html,
+    });
+    
+    console.log(`✅ [EMAIL] Password reset email sent to ${email}`);
+    return true;
+  } catch (error) {
+    console.error(`❌ [EMAIL] Failed to send password reset email to ${email}:`, error);
+    return false;
+  }
 };
 
 /**
@@ -94,14 +113,24 @@ export const sendWelcomeEmail = async (
   email: string,
   username?: string
 ): Promise<boolean> => {
-  // TODO: Implement welcome email
-  // 1. Get transporter
-  // 2. Compose welcome email
-  // 3. Send email
-  // 4. Return success/failure
-
-  console.log(`[EMAIL SERVICE] Would send welcome email to ${email}`);
-  return true;
+  try {
+    const transport = getTransporter();
+    const template = emailTemplates.welcome(username);
+    
+    await transport.sendMail({
+      from: `"${SMTP_FROM_NAME}" <${SMTP_FROM_EMAIL}>`,
+      to: email,
+      subject: template.subject,
+      text: template.text,
+      html: template.html,
+    });
+    
+    console.log(`✅ [EMAIL] Welcome email sent to ${email}`);
+    return true;
+  } catch (error) {
+    console.error(`❌ [EMAIL] Failed to send welcome email to ${email}:`, error);
+    return false;
+  }
 };
 
 /**
@@ -173,7 +202,7 @@ export const emailTemplates = {
           <li>🗺️ View auto-generated ERD diagrams</li>
         </ul>
         <div style="text-align: center; margin: 30px 0;">
-          <a href="${process.env.FRONTEND_URL || 'http://localhost:3001'}" style="background: #28a745; color: white; padding: 12px 30px; text-decoration: none; border-radius: 5px; font-weight: bold;">Get Started</a>
+          <a href="${process.env.FRONTEND_URL || 'http://localhost:5173'}" style="background: #28a745; color: white; padding: 12px 30px; text-decoration: none; border-radius: 5px; font-weight: bold;">Get Started</a>
         </div>
         <hr style="border: none; border-top: 1px solid #eee; margin: 30px 0;">
         <p style="color: #999; font-size: 12px;">© ${new Date().getFullYear()} ChatSQL. All rights reserved.</p>

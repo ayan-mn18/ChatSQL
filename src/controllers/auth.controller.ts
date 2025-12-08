@@ -1,6 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
-// import * as authService from '../services/auth.service';
-// import * as emailService from '../services/email.service';
+import * as authService from '../services/auth.service';
+import * as emailService from '../services/email.service';
+import { generateAccessToken, getAccessTokenCookieOptions, generateRandomToken } from '../utils/auth';
 
 /**
  * Register a new user (Step 1: Send OTP)
@@ -14,19 +15,68 @@ export const register = async (
   try {
     const { email, password, username } = req.body;
     
-    // TODO: Implement registration logic
-    // 1. Check if email already exists and is verified
-    // 2. If user exists but not verified, update password and resend OTP
-    // 3. Generate OTP
-    // 4. Hash OTP and store in email_verifications table
-    // 5. Store user data temporarily (is_verified = false)
+    // 1. Check if email already exists
+    const existingUser = await authService.findByEmail(email);
+    
+    if (existingUser) {
+      // 2. If user exists and is verified, return error
+      if (existingUser.is_verified) {
+        res.status(409).json({
+          success: false,
+          error: 'Email is already registered',
+          code: 'EMAIL_EXISTS'
+        });
+        return;
+      }
+      
+      // 3. If user exists but not verified, update password and resend OTP
+      await authService.updatePassword(existingUser.id, password);
+      
+      // Generate new OTP
+      const otp = authService.generateOtp();
+      await authService.storeEmailVerificationOtp(email, otp);
+      
+      // Send OTP email
+      await emailService.sendVerificationEmail(email, otp);
+      
+      res.status(200).json({
+        success: true,
+        message: 'Verification code sent to your email',
+        data: {
+          email,
+          expiresIn: 600 // 10 minutes in seconds
+        }
+      });
+      return;
+    }
+    
+    // 4. Check if username is taken (if provided)
+    if (username) {
+      const existingUsername = await authService.findByUsername(username);
+      if (existingUsername) {
+        res.status(409).json({
+          success: false,
+          error: 'Username is already taken',
+          code: 'USERNAME_EXISTS'
+        });
+        return;
+      }
+    }
+    
+    // 5. Create new user (unverified) and generate OTP
+    const { user, otp } = await authService.registerUser({ email, password, username });
+    
     // 6. Send OTP email
+    await emailService.sendVerificationEmail(email, otp);
+    
     // 7. Return success message
-
-    res.status(501).json({
-      success: false,
-      error: 'Not implemented yet',
-      code: 'NOT_IMPLEMENTED'
+    res.status(201).json({
+      success: true,
+      message: 'Registration successful. Please verify your email.',
+      data: {
+        email: user.email,
+        expiresIn: 600 // 10 minutes in seconds
+      }
     });
   } catch (error) {
     next(error);
@@ -45,22 +95,74 @@ export const verifyEmail = async (
   try {
     const { email, otp } = req.body;
 
-    // TODO: Implement email verification logic
-    // 1. Find latest OTP record for email
-    // 2. Check if OTP is expired
-    // 3. Check if max attempts exceeded
-    // 4. Verify OTP hash matches
-    // 5. Mark OTP as used
-    // 6. Update user is_verified = true
-    // 7. Generate JWT token
-    // 8. Set cookie
-    // 9. Send welcome email
-    // 10. Return user data
+    // 1. Check if user exists
+    const user = await authService.findByEmail(email);
+    if (!user) {
+      res.status(404).json({
+        success: false,
+        error: 'User not found',
+        code: 'USER_NOT_FOUND'
+      });
+      return;
+    }
 
-    res.status(501).json({
-      success: false,
-      error: 'Not implemented yet',
-      code: 'NOT_IMPLEMENTED'
+    // 2. Check if already verified
+    if (user.is_verified) {
+      res.status(400).json({
+        success: false,
+        error: 'Email is already verified',
+        code: 'ALREADY_VERIFIED'
+      });
+      return;
+    }
+
+    // 3. Verify OTP (checks expiry, attempts, and hash match)
+    const otpResult = await authService.verifyEmailOtp(email, otp);
+    
+    if (!otpResult.valid) {
+      res.status(400).json({
+        success: false,
+        error: otpResult.error || 'Invalid OTP',
+        code: 'INVALID_OTP'
+      });
+      return;
+    }
+
+    // 4. Mark email as verified
+    const verifiedUser = await authService.markEmailAsVerified(email);
+    
+    if (!verifiedUser) {
+      res.status(500).json({
+        success: false,
+        error: 'Failed to verify email',
+        code: 'VERIFICATION_FAILED'
+      });
+      return;
+    }
+
+    // 5. Generate JWT token
+    const accessToken = generateAccessToken({
+      userId: verifiedUser.id,
+      email: verifiedUser.email
+    });
+
+    // 6. Set cookie
+    res.cookie('chatsql-access-token', accessToken, getAccessTokenCookieOptions());
+
+    // 7. Send welcome email (non-blocking)
+    emailService.sendWelcomeEmail(email, verifiedUser.username || undefined);
+
+    // 8. Update last login
+    await authService.updateLastLogin(verifiedUser.id);
+
+    // 9. Return user data
+    res.status(200).json({
+      success: true,
+      message: 'Email verified successfully',
+      data: {
+        user: authService.toPublicUser(verifiedUser),
+        accessToken
+      }
     });
   } catch (error) {
     next(error);
@@ -79,20 +181,62 @@ export const resendOtp = async (
   try {
     const { email } = req.body;
 
-    // TODO: Implement resend OTP logic
     // 1. Check if user exists
-    // 2. Check if user is already verified (error if yes)
-    // 3. Check rate limiting (e.g., max 3 OTPs per hour)
-    // 4. Invalidate previous OTPs
-    // 5. Generate new OTP
-    // 6. Store OTP hash
-    // 7. Send OTP email
-    // 8. Return success with expiry time
+    const user = await authService.findByEmail(email);
+    if (!user) {
+      res.status(404).json({
+        success: false,
+        error: 'No account found with this email',
+        code: 'USER_NOT_FOUND'
+      });
+      return;
+    }
 
-    res.status(501).json({
-      success: false,
-      error: 'Not implemented yet',
-      code: 'NOT_IMPLEMENTED'
+    // 2. Check if user is already verified
+    if (user.is_verified) {
+      res.status(400).json({
+        success: false,
+        error: 'Email is already verified',
+        code: 'ALREADY_VERIFIED'
+      });
+      return;
+    }
+
+    // 3. Check rate limiting - count OTPs sent in last hour
+    const recentOtpCount = await authService.countRecentOtps(email, 60); // 60 minutes
+    if (recentOtpCount >= 3) {
+      res.status(429).json({
+        success: false,
+        error: 'Too many OTP requests. Please try again later.',
+        code: 'RATE_LIMIT_EXCEEDED'
+      });
+      return;
+    }
+
+    // 4. Generate new OTP (storeEmailVerificationOtp invalidates previous OTPs)
+    const otp = authService.generateOtp();
+    await authService.storeEmailVerificationOtp(email, otp);
+
+    // 5. Send OTP email
+    const emailSent = await emailService.sendVerificationEmail(email, otp);
+    
+    if (!emailSent) {
+      res.status(500).json({
+        success: false,
+        error: 'Failed to send verification email. Please try again.',
+        code: 'EMAIL_SEND_FAILED'
+      });
+      return;
+    }
+
+    // 6. Return success with expiry time
+    res.status(200).json({
+      success: true,
+      message: 'Verification code sent to your email',
+      data: {
+        email,
+        expiresIn: 600 // 10 minutes in seconds
+      }
     });
   } catch (error) {
     next(error);
@@ -111,20 +255,70 @@ export const login = async (
   try {
     const { email, password } = req.body;
 
-    // TODO: Implement login logic
     // 1. Find user by email
-    // 2. Check if user exists
-    // 3. Check if email is verified (error if not)
-    // 4. Verify password
-    // 5. Update last_login_at
-    // 6. Generate JWT token
-    // 7. Set cookie
-    // 8. Return user data
+    const user = await authService.findByEmail(email);
+    
+    if (!user) {
+      res.status(401).json({
+        success: false,
+        error: 'Invalid email or password',
+        code: 'INVALID_CREDENTIALS'
+      });
+      return;
+    }
 
-    res.status(501).json({
-      success: false,
-      error: 'Not implemented yet',
-      code: 'NOT_IMPLEMENTED'
+    // 2. Check if email is verified
+    if (!user.is_verified) {
+      res.status(403).json({
+        success: false,
+        error: 'Please verify your email before logging in',
+        code: 'EMAIL_NOT_VERIFIED'
+      });
+      return;
+    }
+
+    // 3. Check if account is active
+    if (!user.is_active) {
+      res.status(403).json({
+        success: false,
+        error: 'Your account has been deactivated',
+        code: 'ACCOUNT_DEACTIVATED'
+      });
+      return;
+    }
+
+    // 4. Verify password
+    const isValidPassword = await authService.verifyPassword(password, user.password_hash);
+    
+    if (!isValidPassword) {
+      res.status(401).json({
+        success: false,
+        error: 'Invalid email or password',
+        code: 'INVALID_CREDENTIALS'
+      });
+      return;
+    }
+
+    // 5. Update last_login_at
+    await authService.updateLastLogin(user.id);
+
+    // 6. Generate JWT token
+    const accessToken = generateAccessToken({
+      userId: user.id,
+      email: user.email
+    });
+
+    // 7. Set cookie
+    res.cookie('chatsql-access-token', accessToken, getAccessTokenCookieOptions());
+
+    // 8. Return user data
+    res.status(200).json({
+      success: true,
+      message: 'Login successful',
+      data: {
+        user: authService.toPublicUser(user),
+        accessToken
+      }
     });
   } catch (error) {
     next(error);
@@ -142,7 +336,7 @@ export const logout = async (
 ): Promise<void> => {
   try {
     // Clear the JWT cookie
-    res.clearCookie('token', {
+    res.clearCookie('chatsql-access-token', {
       httpOnly: true,
       secure: process.env.NODE_ENV === 'production',
       sameSite: 'lax',
@@ -170,18 +364,35 @@ export const forgotPassword = async (
   try {
     const { email } = req.body;
 
-    // TODO: Implement forgot password logic
     // 1. Find user by email
-    // 2. If user doesn't exist, still return success (security)
-    // 3. Generate reset token
-    // 4. Hash token and store in password_resets table
-    // 5. Send password reset email with link
-    // 6. Return success message
+    const user = await authService.findByEmail(email);
+    
+    // 2. If user doesn't exist, still return success (security - don't reveal if email exists)
+    if (!user) {
+      res.status(200).json({
+        success: true,
+        message: 'If an account with that email exists, a password reset link has been sent.'
+      });
+      return;
+    }
 
-    res.status(501).json({
-      success: false,
-      error: 'Not implemented yet',
-      code: 'NOT_IMPLEMENTED'
+    // 3. Generate reset token
+    const resetToken = generateRandomToken();
+
+    // 4. Hash token and store in password_resets table
+    await authService.storePasswordResetToken(user.id, resetToken);
+
+    // 5. Create reset URL
+    const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5173';
+    const resetUrl = `${frontendUrl}/reset-password?token=${resetToken}`;
+
+    // 6. Send password reset email
+    await emailService.sendPasswordResetEmail(email, resetToken, resetUrl);
+
+    // 7. Return success message
+    res.status(200).json({
+      success: true,
+      message: 'If an account with that email exists, a password reset link has been sent.'
     });
   } catch (error) {
     next(error);
@@ -200,20 +411,37 @@ export const resetPassword = async (
   try {
     const { token, newPassword } = req.body;
 
-    // TODO: Implement reset password logic
-    // 1. Find reset token in database
-    // 2. Check if token is expired
-    // 3. Check if token is already used
-    // 4. Verify token hash
-    // 5. Update user password
-    // 6. Mark token as used
-    // 7. Optionally: Send confirmation email
-    // 8. Return success message
+    // 1. Verify token (checks if valid, not expired, not used)
+    const tokenResult = await authService.verifyPasswordResetToken(token);
 
-    res.status(501).json({
-      success: false,
-      error: 'Not implemented yet',
-      code: 'NOT_IMPLEMENTED'
+    if (!tokenResult.valid || !tokenResult.userId) {
+      res.status(400).json({
+        success: false,
+        error: tokenResult.error || 'Invalid or expired reset token',
+        code: 'INVALID_TOKEN'
+      });
+      return;
+    }
+
+    // 2. Get user
+    const user = await authService.findById(tokenResult.userId);
+    
+    if (!user) {
+      res.status(404).json({
+        success: false,
+        error: 'User not found',
+        code: 'USER_NOT_FOUND'
+      });
+      return;
+    }
+
+    // 3. Update user password
+    await authService.updatePassword(user.id, newPassword);
+
+    // 4. Return success message
+    res.status(200).json({
+      success: true,
+      message: 'Password has been reset successfully. You can now login with your new password.'
     });
   } catch (error) {
     next(error);
@@ -232,14 +460,33 @@ export const getCurrentUser = async (
   try {
     const { userId } = req;
 
-    // TODO: Implement get current user logic
-    // 1. Fetch user from database by userId
-    // 2. Return public user data (exclude password_hash)
+    if (!userId) {
+      res.status(401).json({
+        success: false,
+        error: 'Authentication required',
+        code: 'AUTH_REQUIRED'
+      });
+      return;
+    }
 
-    res.status(501).json({
-      success: false,
-      error: 'Not implemented yet',
-      code: 'NOT_IMPLEMENTED'
+    // 1. Fetch user from database by userId
+    const user = await authService.findById(userId);
+
+    if (!user) {
+      res.status(404).json({
+        success: false,
+        error: 'User not found',
+        code: 'USER_NOT_FOUND'
+      });
+      return;
+    }
+
+    // 2. Return public user data (exclude password_hash)
+    res.status(200).json({
+      success: true,
+      data: {
+        user: authService.toPublicUser(user)
+      }
     });
   } catch (error) {
     next(error);
@@ -259,15 +506,47 @@ export const updateProfile = async (
     const { userId } = req;
     const { username, profile_url } = req.body;
 
-    // TODO: Implement update profile logic
-    // 1. Check if username is already taken (if changing)
-    // 2. Update user in database
-    // 3. Return updated user data
+    if (!userId) {
+      res.status(401).json({
+        success: false,
+        error: 'Authentication required',
+        code: 'AUTH_REQUIRED'
+      });
+      return;
+    }
 
-    res.status(501).json({
-      success: false,
-      error: 'Not implemented yet',
-      code: 'NOT_IMPLEMENTED'
+    // 1. Check if username is already taken (if changing)
+    if (username) {
+      const existingUser = await authService.findByUsername(username);
+      if (existingUser && existingUser.id !== userId) {
+        res.status(409).json({
+          success: false,
+          error: 'Username is already taken',
+          code: 'USERNAME_EXISTS'
+        });
+        return;
+      }
+    }
+
+    // 2. Update user in database
+    const updatedUser = await authService.updateProfile(userId, { username, profile_url });
+
+    if (!updatedUser) {
+      res.status(404).json({
+        success: false,
+        error: 'User not found',
+        code: 'USER_NOT_FOUND'
+      });
+      return;
+    }
+
+    // 3. Return updated user data
+    res.status(200).json({
+      success: true,
+      message: 'Profile updated successfully',
+      data: {
+        user: authService.toPublicUser(updatedUser)
+      }
     });
   } catch (error) {
     next(error);
@@ -287,16 +566,46 @@ export const changePassword = async (
     const { userId } = req;
     const { currentPassword, newPassword } = req.body;
 
-    // TODO: Implement change password logic
-    // 1. Verify current password
-    // 2. Hash new password
-    // 3. Update password in database
-    // 4. Return success message
+    if (!userId) {
+      res.status(401).json({
+        success: false,
+        error: 'Authentication required',
+        code: 'AUTH_REQUIRED'
+      });
+      return;
+    }
 
-    res.status(501).json({
-      success: false,
-      error: 'Not implemented yet',
-      code: 'NOT_IMPLEMENTED'
+    // 1. Get user
+    const user = await authService.findById(userId);
+    
+    if (!user) {
+      res.status(404).json({
+        success: false,
+        error: 'User not found',
+        code: 'USER_NOT_FOUND'
+      });
+      return;
+    }
+
+    // 2. Verify current password
+    const isValidPassword = await authService.verifyPassword(currentPassword, user.password_hash);
+    
+    if (!isValidPassword) {
+      res.status(401).json({
+        success: false,
+        error: 'Current password is incorrect',
+        code: 'INVALID_PASSWORD'
+      });
+      return;
+    }
+
+    // 3. Update password in database
+    await authService.updatePassword(userId, newPassword);
+
+    // 4. Return success message
+    res.status(200).json({
+      success: true,
+      message: 'Password changed successfully'
     });
   } catch (error) {
     next(error);
@@ -316,16 +625,54 @@ export const deleteAccount = async (
     const { userId } = req;
     const { password } = req.body;
 
-    // TODO: Implement delete account logic
-    // 1. Verify password
-    // 2. Delete user and all related data (cascade)
-    // 3. Clear cookies
-    // 4. Return success message
+    if (!userId) {
+      res.status(401).json({
+        success: false,
+        error: 'Authentication required',
+        code: 'AUTH_REQUIRED'
+      });
+      return;
+    }
 
-    res.status(501).json({
-      success: false,
-      error: 'Not implemented yet',
-      code: 'NOT_IMPLEMENTED'
+    // 1. Get user
+    const user = await authService.findById(userId);
+    
+    if (!user) {
+      res.status(404).json({
+        success: false,
+        error: 'User not found',
+        code: 'USER_NOT_FOUND'
+      });
+      return;
+    }
+
+    // 2. Verify password
+    const isValidPassword = await authService.verifyPassword(password, user.password_hash);
+    
+    if (!isValidPassword) {
+      res.status(401).json({
+        success: false,
+        error: 'Password is incorrect',
+        code: 'INVALID_PASSWORD'
+      });
+      return;
+    }
+
+    // 3. Delete user and all related data (cascade)
+    await authService.deleteUser(userId);
+
+    // 4. Clear cookies
+    res.clearCookie('chatsql-access-token', {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'lax',
+      path: '/'
+    });
+
+    // 5. Return success message
+    res.status(200).json({
+      success: true,
+      message: 'Account deleted successfully'
     });
   } catch (error) {
     next(error);

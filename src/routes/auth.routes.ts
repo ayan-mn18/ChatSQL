@@ -1,5 +1,17 @@
 import { Router } from 'express';
-import { authenticate, validate, registerSchema, loginSchema, updateProfileSchema } from '../middleware';
+import { 
+  authenticate, 
+  validate, 
+  registerSchema, 
+  loginSchema, 
+  updateProfileSchema, 
+  verifyEmailSchema, 
+  resendOtpSchema,
+  forgotPasswordSchema,
+  resetPasswordSchema,
+  changePasswordSchema,
+  deleteAccountSchema
+} from '../middleware';
 import * as authController from '../controllers/auth.controller';
 
 const router = Router();
@@ -16,14 +28,14 @@ router.post('/register', validate(registerSchema), authController.register);
  * @desc    Verify email with OTP
  * @access  Public
  */
-router.post('/verify-email', authController.verifyEmail);
+router.post('/verify-email', validate(verifyEmailSchema), authController.verifyEmail);
 
 /**
  * @route   POST /api/auth/resend-otp
  * @desc    Resend OTP to email
  * @access  Public
  */
-router.post('/resend-otp', authController.resendOtp);
+router.post('/resend-otp', validate(resendOtpSchema), authController.resendOtp);
 
 /**
  * @route   POST /api/auth/login
@@ -44,14 +56,14 @@ router.post('/logout', authenticate, authController.logout);
  * @desc    Request password reset email
  * @access  Public
  */
-router.post('/forgot-password', authController.forgotPassword);
+router.post('/forgot-password', validate(forgotPasswordSchema), authController.forgotPassword);
 
 /**
  * @route   POST /api/auth/reset-password
  * @desc    Reset password with token
  * @access  Public
  */
-router.post('/reset-password', authController.resetPassword);
+router.post('/reset-password', validate(resetPasswordSchema), authController.resetPassword);
 
 /**
  * @route   GET /api/auth/me
@@ -72,13 +84,13 @@ router.put('/profile', authenticate, validate(updateProfileSchema), authControll
  * @desc    Change user password
  * @access  Private
  */
-router.post('/change-password', authenticate, authController.changePassword);
+router.post('/change-password', authenticate, validate(changePasswordSchema), authController.changePassword);
 
 /**
  * @route   DELETE /api/auth/account
  * @desc    Delete user account
  * @access  Private
  */
-router.delete('/account', authenticate, authController.deleteAccount);
+router.delete('/account', authenticate, validate(deleteAccountSchema), authController.deleteAccount);
 
 export default router;

@@ -9,6 +9,7 @@ import cookieParser from 'cookie-parser';
 import { getQuery } from './src/service/openai';
 import { getTables, getTableData } from './src/service/dataApiService';
 import { Sequelize } from 'sequelize';
+import { connectDatabase } from './src/config/db';
 
 // Import routes
 import { authRoutes } from './src/routes';
@@ -24,7 +25,7 @@ app.use(morgan('dev'));
 app.use(express.json());
 app.use(cookieParser());
 app.use(cors({
-  origin: process.env.CORS_ORIGIN || "*",
+  origin: process.env.CORS_ORIGIN || "http://localhost:5173",
   credentials: true // Important for cookies
 }));
 
@@ -255,8 +256,9 @@ app.use(notFoundHandler);
 app.use(errorHandler);
 
 // Start the server and listen on the specified port
-app.listen(PORT, () => {
+app.listen(PORT, async () => {
   // Log a message when the server is successfully running
+  await connectDatabase();
   console.log(`🚀 Server is running on http://localhost:${PORT}`);
   console.log(`📚 Environment: ${process.env.NODE_ENV || 'development'}`);
 });

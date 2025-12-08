@@ -9,6 +9,13 @@ import {
 } from '../utils/auth';
 
 /**
+ * Verify password against hash
+ */
+export const verifyPassword = async (password: string, hash: string): Promise<boolean> => {
+  return comparePassword(password, hash);
+};
+
+/**
  * Find user by email
  */
 export const findByEmail = async (email: string): Promise<User | null> => {
@@ -178,6 +185,19 @@ export const generateOtp = (): string => {
 };
 
 /**
+ * Count recent OTPs sent to an email (for rate limiting)
+ */
+export const countRecentOtps = async (email: string, minutes: number): Promise<number> => {
+  const result = await sequelize.query<{ count: string }>(
+    `SELECT COUNT(*) as count FROM email_verifications 
+     WHERE email = :email 
+     AND created_at > NOW() - INTERVAL '${minutes} minutes'`,
+    { replacements: { email }, type: QueryTypes.SELECT }
+  );
+  return parseInt(result[0]?.count || '0', 10);
+};
+
+/**
  * Store OTP for email verification
  */
 export const storeEmailVerificationOtp = async (
@@ -282,6 +302,36 @@ export const storePasswordResetToken = async (
       type: QueryTypes.INSERT
     }
   );
+};
+
+/**
+ * Verify password reset token and return user_id if valid
+ */
+export const verifyPasswordResetToken = async (
+  token: string
+): Promise<{ valid: boolean; userId?: string; error?: string }> => {
+  // Find all unused, non-expired tokens
+  const records = await sequelize.query<{ id: string; user_id: string; token_hash: string; expires_at: Date }>(
+    `SELECT id, user_id, token_hash, expires_at FROM password_resets 
+     WHERE is_used = false AND expires_at > NOW()
+     ORDER BY created_at DESC`,
+    { type: QueryTypes.SELECT }
+  );
+
+  // Check each token hash (we need to compare since we can't query by hash directly)
+  for (const record of records) {
+    const isValid = await comparePassword(token, record.token_hash);
+    if (isValid) {
+      // Mark token as used
+      await sequelize.query(
+        `UPDATE password_resets SET is_used = true WHERE id = :id`,
+        { replacements: { id: record.id }, type: QueryTypes.UPDATE }
+      );
+      return { valid: true, userId: record.user_id };
+    }
+  }
+
+  return { valid: false, error: 'Invalid or expired reset token' };
 };
 
 /**

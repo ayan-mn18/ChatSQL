@@ -24,7 +24,9 @@ export const authenticate = async (
   next: NextFunction
 ): Promise<void> => {
   try {
-    const token = req.cookies?.token;
+    // Check cookie first, then Authorization header
+    const token = req.cookies?.['chatsql-access-token'] || 
+                  req.headers.authorization?.replace('Bearer ', '');
 
     if (!token) {
       res.status(401).json({
@@ -89,7 +91,8 @@ export const optionalAuth = async (
   next: NextFunction
 ): Promise<void> => {
   try {
-    const token = req.cookies?.token;
+    const token = req.cookies?.['chatsql-access-token'] || 
+                  req.headers.authorization?.replace('Bearer ', '');
 
     if (token && JWT_SECRET) {
       const decoded = jwt.verify(token, JWT_SECRET) as JWTPayload;

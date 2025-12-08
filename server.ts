@@ -27,7 +27,10 @@ import { logger } from './src/utils/logger';
 const app = express();
 
 // Middleware
-app.use(morgan('dev'));
+// Skip logging for Bull Board polling requests
+app.use(morgan('dev', {
+  skip: (req) => req.originalUrl.startsWith('/admin/queues')
+}));
 app.use(express.json());
 app.use(cookieParser());
 app.use(corsConfig);

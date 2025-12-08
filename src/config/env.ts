@@ -1,5 +1,6 @@
 import dotenv from 'dotenv';
 import { z } from 'zod';
+import cors from 'cors';
 
 // Load environment variables
 dotenv.config();
@@ -71,3 +72,12 @@ export const {
 export const isDevelopment = NODE_ENV === 'development';
 export const isProduction = NODE_ENV === 'production';
 export const isTest = NODE_ENV === 'test';
+
+export const corsConfig = cors({
+  origin: [CORS_ORIGIN, 'http://localhost:5173'], // Allow frontend URL
+  credentials: true, // Allow cookies
+  optionsSuccessStatus: 200,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  maxAge: 86400, // 24 hours
+});

@@ -14,3 +14,15 @@ export {
   paginationSchema, 
   uuidParamSchema 
 } from './validator';
+export {
+  rateLimit,
+  globalRateLimit,
+  authRateLimit,
+  aiRateLimit,
+  heavyRateLimit,
+  connectionRateLimit,
+  getRateLimitStatus,
+  resetRateLimit,
+  consumeRateLimit,
+  type RateLimitType,
+} from './rateLimit';

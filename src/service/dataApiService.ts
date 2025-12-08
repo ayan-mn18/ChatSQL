@@ -157,9 +157,10 @@ export const getTables = async (uri: string): Promise<{ tables: TableInfo[]; tot
       return {
         id: table.name,
         name: table.name,
+        schema_name: table.schema || 'public',
         description: table.description || '',
         rowCount: parseInt(table.row_count, 10) || 0,
-        schema: table.schema,
+        table_type: 'BASE TABLE' as const,
         columns: mappedColumns,
       } as TableInfo;
     });

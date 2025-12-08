@@ -12,11 +12,14 @@ import { Sequelize } from 'sequelize';
 import { connectDatabase } from './src/config/db';
 
 // Import routes
-import { authRoutes } from './src/routes';
+import { authRoutes, connectionRoutes, jobsRoutes, adminRoutes } from './src/routes';
 
 // Import middleware
-import { errorHandler, notFoundHandler } from './src/middleware';
-import { corsConfig, env } from './src/config';
+import { errorHandler, notFoundHandler, globalRateLimit } from './src/middleware';
+import { corsConfig, env, checkRedisHealth, closeRedisConnections } from './src/config';
+
+// Import queue workers
+import { createSchemaSyncWorker, createAIOperationsWorker } from './src/queues';
 
 import { logger } from './src/utils/logger';
 
@@ -28,6 +31,9 @@ app.use(morgan('dev'));
 app.use(express.json());
 app.use(cookieParser());
 app.use(corsConfig);
+
+// Apply global rate limiting
+app.use(globalRateLimit);
 
 // Set the port number for the server
 const { PORT } = process.env;
@@ -231,8 +237,16 @@ app.get('/api/health', (req: Request, res: Response) => {
 // Auth routes
 app.use('/api/auth', authRoutes);
 
+// Connection routes
+app.use('/api/connections', connectionRoutes);
+
+// Jobs routes (SSE progress, job status)
+app.use('/api/jobs', jobsRoutes);
+
+// Admin routes (Bull Board dashboard)
+app.use('/admin/queues', adminRoutes);
+
 // Future routes - uncomment when implemented
-// app.use('/api/connections', connectionRoutes);
 // app.use('/api/query', queryRoutes);
 // app.use('/api/schema', schemaRoutes);
 // app.use('/api/data', dataRoutes);
@@ -255,11 +269,59 @@ async function testDbConnection(uri: string): Promise<boolean> {
 app.use(notFoundHandler);
 app.use(errorHandler);
 
+// Queue workers (will be started after server starts)
+let schemaSyncWorker: ReturnType<typeof createSchemaSyncWorker> | null = null;
+let aiOperationsWorker: ReturnType<typeof createAIOperationsWorker> | null = null;
+
+// Graceful shutdown handler
+async function gracefulShutdown(signal: string) {
+  logger.info(`[SERVER] ${signal} received, shutting down gracefully...`);
+  
+  // Close workers
+  if (schemaSyncWorker) {
+    logger.info('[SERVER] Closing schema sync worker...');
+    await schemaSyncWorker.close();
+  }
+  
+  if (aiOperationsWorker) {
+    logger.info('[SERVER] Closing AI operations worker...');
+    await aiOperationsWorker.close();
+  }
+  
+  // Close Redis connections
+  await closeRedisConnections();
+  
+  logger.info('[SERVER] Shutdown complete');
+  process.exit(0);
+}
+
+// Register shutdown handlers
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+
 // Start the server and listen on the specified port
 app.listen(PORT, async () => {
   // Log a message when the server is successfully running
   logger.info('Cors allowed for:', env.CORS_ORIGIN || "https://sql.bizer.dev");
   logger.info(`🚀 Server is running on http://localhost:${PORT}`);
   logger.info(`📚 Environment: ${env.NODE_ENV || 'development'}`);
+  
+  // Connect to database
   await connectDatabase();
+  
+  // Check Redis and start workers
+  const redisHealthy = await checkRedisHealth();
+  if (redisHealthy) {
+    logger.info('[SERVER] ✅ Redis connected, starting queue workers...');
+    
+    // Start workers
+    schemaSyncWorker = createSchemaSyncWorker();
+    aiOperationsWorker = createAIOperationsWorker();
+    
+    logger.info('[SERVER] ✅ Queue workers started');
+    logger.info('[SERVER] 📊 Bull Board available at http://localhost:' + PORT + '/admin/queues');
+  } else {
+    logger.warn('[SERVER] ⚠️ Redis not available, queue workers not started');
+    logger.warn('[SERVER] Schema sync and AI operations will not work');
+  }
 });

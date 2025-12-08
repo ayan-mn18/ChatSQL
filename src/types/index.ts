@@ -124,7 +124,7 @@ export interface PaginatedResponse<T> extends ApiResponse<T[]> {
 }
 
 // ============================================
-// CONNECTION TYPES (Future)
+// CONNECTION TYPES
 // ============================================
 export interface Connection {
   id: string;
@@ -132,37 +132,202 @@ export interface Connection {
   name: string;
   host: string;
   port: number;
-  type: 'postgres' | 'mysql' | 'mssql' | 'mongodb';
+  type: 'postgres'; // Only PostgreSQL for now
   db_name: string;
   username: string;
-  password_enc: string;
+  password_enc: string; // Encrypted, never returned to client
+  ssl: boolean;
   extra_options?: Record<string, any>;
   is_valid: boolean;
+  schema_synced: boolean;
+  schema_synced_at: Date | null;
   last_tested_at: Date | null;
   created_at: Date;
   updated_at: Date;
 }
 
+// Connection without sensitive data (for API responses)
+export interface ConnectionPublic {
+  id: string;
+  user_id: string;
+  name: string;
+  host: string;
+  port: number;
+  type: 'postgres';
+  db_name: string;
+  username: string;
+  ssl: boolean;
+  is_valid: boolean;
+  schema_synced: boolean;
+  schema_synced_at: Date | null;
+  last_tested_at: Date | null;
+  created_at: Date;
+  updated_at: Date;
+}
+
+// Request types for connection APIs
+export interface TestConnectionRequest {
+  host: string;
+  port: number;
+  db_name: string;
+  username: string;
+  password: string;
+  ssl?: boolean;
+}
+
+export interface CreateConnectionRequest {
+  name: string;
+  host: string;
+  port: number;
+  db_name: string;
+  username: string;
+  password: string;
+  ssl?: boolean;
+}
+
+export interface UpdateConnectionRequest {
+  name?: string;
+  host?: string;
+  port?: number;
+  db_name?: string;
+  username?: string;
+  password?: string; // Only if changing password
+  ssl?: boolean;
+}
+
+export interface TestConnectionResponse {
+  success: boolean;
+  message: string;
+  latency_ms?: number;
+  schemas?: string[]; // Available PostgreSQL schemas found during test
+  error?: string;
+  code?: string;
+}
+
 // ============================================
-// TABLE & SCHEMA TYPES
+// DATABASE SCHEMA TYPES (PostgreSQL schemas like public, analytics, etc.)
+// ============================================
+export interface DatabaseSchema {
+  id: string;
+  connection_id: string;
+  schema_name: string;
+  is_selected: boolean;
+  table_count: number;
+  description?: string;
+  last_synced_at: Date | null;
+  created_at: Date;
+  updated_at: Date;
+}
+
+export interface DatabaseSchemaPublic {
+  id: string;
+  schema_name: string;
+  is_selected: boolean;
+  table_count: number;
+  description?: string;
+  last_synced_at: Date | null;
+}
+
+// Request to update which schemas are selected
+export interface UpdateSchemasRequest {
+  schemas: Array<{
+    schema_name: string;
+    is_selected: boolean;
+  }>;
+}
+
+// ============================================
+// TABLE SCHEMA TYPES (Cached table metadata)
+// ============================================
+export interface TableSchema {
+  id: string;
+  connection_id: string;
+  database_schema_id?: string;
+  schema_name: string;
+  table_name: string;
+  table_type: 'BASE TABLE' | 'VIEW' | 'MATERIALIZED VIEW';
+  columns: TableColumnDef[];
+  primary_key_columns?: string[];
+  indexes?: IndexDef[];
+  row_count?: number;
+  table_size_bytes?: number;
+  description?: string;
+  last_fetched_at: Date;
+  created_at: Date;
+  updated_at: Date;
+}
+
+export interface TableColumnDef {
+  name: string;
+  data_type: string;           // e.g., 'varchar(255)', 'integer', 'uuid'
+  udt_name: string;            // Underlying type name (e.g., 'int4', 'varchar')
+  is_nullable: boolean;
+  is_primary_key: boolean;
+  is_foreign_key: boolean;
+  foreign_key_ref?: {
+    table: string;
+    column: string;
+    schema: string;
+  };
+  default_value?: string;
+  max_length?: number;
+  numeric_precision?: number;
+  column_comment?: string;
+}
+
+export interface IndexDef {
+  name: string;
+  columns: string[];
+  is_unique: boolean;
+  is_primary: boolean;
+  type: string; // btree, hash, gin, gist, etc.
+}
+
+// ============================================
+// TABLE & SCHEMA TYPES (for API responses)
 // ============================================
 export interface TableInfo {
   id: string;
   name: string;
-  description: string;
-  rowCount: number;
-  schema?: string;
+  schema_name: string; // PostgreSQL schema (public, analytics, etc.)
+  description?: string;
+  rowCount?: number;
+  table_type: 'BASE TABLE' | 'VIEW' | 'MATERIALIZED VIEW';
   columns: ColumnInfo[];
 }
 
 export interface ColumnInfo {
   key: string;
   label: string;
-  type: 'string' | 'number' | 'date' | 'boolean';
-  dataType: string;
+  type: 'string' | 'number' | 'date' | 'boolean' | 'json' | 'array';
+  dataType: string;           // Original PostgreSQL type
   sortable: boolean;
   isPrimaryKey?: boolean;
+  isForeignKey?: boolean;
+  foreignKeyRef?: {
+    schema: string;
+    table: string;
+    column: string;
+  };
   isNullable?: boolean;
+  defaultValue?: string;
+}
+
+// Schema-grouped response for sidebar
+export interface SchemaWithTables {
+  schema_name: string;
+  is_selected: boolean;
+  table_count: number;
+  tables: TableInfo[];
+}
+
+export interface GetSchemasResponse {
+  success: boolean;
+  schemas: DatabaseSchemaPublic[];
+  total_schemas: number;
+  cached?: boolean;
+  cachedAt?: Date;
+  error?: string;
 }
 
 // ============================================
@@ -194,6 +359,7 @@ export interface GetTableDataRequest {
   filters?: FilterCondition[];
   searchValue?: string;
   columns?: string[];
+  schema_name?: string; // Filter by PostgreSQL schema
 }
 
 export interface FilterCondition {
@@ -207,12 +373,15 @@ export interface GetTableDataResponse {
   data: Record<string, any>[];
   pagination: PaginationInfo;
   columns: ColumnInfo[];
+  schema_name?: string;
+  table_name?: string;
   error?: string;
 }
 
 export interface GetTablesResponse {
   success: boolean;
-  tables: TableInfo[];
+  schemas: SchemaWithTables[]; // Tables grouped by schema
+  totalSchemas: number;
   totalTables: number;
   cached?: boolean;
   cachedAt?: Date;

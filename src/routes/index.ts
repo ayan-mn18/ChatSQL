@@ -1,5 +1,7 @@
 export { default as authRoutes } from './auth.routes';
 export { default as connectionRoutes } from './connection.routes';
+export { default as jobsRoutes } from './jobs.routes';
+export { default as adminRoutes } from './admin.routes';
 
 // Future routes - uncomment when implemented
 // export { default as queryRoutes } from './query.routes';

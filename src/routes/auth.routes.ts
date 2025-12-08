@@ -10,7 +10,8 @@ import {
   forgotPasswordSchema,
   resetPasswordSchema,
   changePasswordSchema,
-  deleteAccountSchema
+  deleteAccountSchema,
+  authRateLimit,
 } from '../middleware';
 import * as authController from '../controllers/auth.controller';
 
@@ -21,28 +22,28 @@ const router = Router();
  * @desc    Register a new user (sends OTP to email)
  * @access  Public
  */
-router.post('/register', validate(registerSchema), authController.register);
+router.post('/register', authRateLimit, validate(registerSchema), authController.register);
 
 /**
  * @route   POST /api/auth/verify-email
  * @desc    Verify email with OTP
  * @access  Public
  */
-router.post('/verify-email', validate(verifyEmailSchema), authController.verifyEmail);
+router.post('/verify-email', authRateLimit, validate(verifyEmailSchema), authController.verifyEmail);
 
 /**
  * @route   POST /api/auth/resend-otp
  * @desc    Resend OTP to email
  * @access  Public
  */
-router.post('/resend-otp', validate(resendOtpSchema), authController.resendOtp);
+router.post('/resend-otp', authRateLimit, validate(resendOtpSchema), authController.resendOtp);
 
 /**
  * @route   POST /api/auth/login
  * @desc    Login user (only verified emails allowed)
  * @access  Public
  */
-router.post('/login', validate(loginSchema), authController.login);
+router.post('/login', authRateLimit, validate(loginSchema), authController.login);
 
 /**
  * @route   POST /api/auth/logout
@@ -56,7 +57,7 @@ router.post('/logout', authenticate, authController.logout);
  * @desc    Request password reset email
  * @access  Public
  */
-router.post('/forgot-password', validate(forgotPasswordSchema), authController.forgotPassword);
+router.post('/forgot-password', authRateLimit, validate(forgotPasswordSchema), authController.forgotPassword);
 
 /**
  * @route   POST /api/auth/reset-password

@@ -1,5 +1,6 @@
 import { Router } from 'express';
-import { authenticate, connectionRateLimit, heavyRateLimit } from '../middleware';
+import { authenticate, connectionRateLimit, heavyRateLimit, validate } from '../middleware';
+import { testConnectionSchema, createConnectionSchema, updateConnectionSchema, uuidParamSchema } from '../middleware/validator';
 import * as connectionController from '../controllers/connection.controller';
 
 const router = Router();
@@ -15,7 +16,7 @@ const router = Router();
  * @access  Private
  * @body    { host, port, db_name, username, password, ssl? }
  */
-router.post('/test', authenticate, connectionRateLimit, connectionController.testConnection);
+router.post('/test', authenticate, connectionRateLimit, validate(testConnectionSchema), connectionController.testConnection);
 
 /**
  * @route   POST /api/connections
@@ -23,7 +24,7 @@ router.post('/test', authenticate, connectionRateLimit, connectionController.tes
  * @access  Private
  * @body    { name, host, port, db_name, username, password, ssl? }
  */
-router.post('/', authenticate, connectionRateLimit, connectionController.createConnection);
+router.post('/', authenticate, connectionRateLimit, validate(createConnectionSchema), connectionController.createConnection);
 
 /**
  * @route   GET /api/connections
@@ -37,7 +38,7 @@ router.get('/', authenticate, connectionController.getAllConnections);
  * @desc    Get single connection by ID
  * @access  Private
  */
-router.get('/:id', authenticate, connectionController.getConnectionById);
+router.get('/:id', authenticate, validate(uuidParamSchema), connectionController.getConnectionById);
 
 /**
  * @route   PUT /api/connections/:id
@@ -45,21 +46,21 @@ router.get('/:id', authenticate, connectionController.getConnectionById);
  * @access  Private
  * @body    { name?, host?, port?, db_name?, username?, password?, ssl? }
  */
-router.put('/:id', authenticate, connectionController.updateConnection);
+router.put('/:id', authenticate, validate(uuidParamSchema), validate(updateConnectionSchema), connectionController.updateConnection);
 
 /**
  * @route   DELETE /api/connections/:id
  * @desc    Delete connection
  * @access  Private
  */
-router.delete('/:id', authenticate, connectionController.deleteConnection);
+router.delete('/:id', authenticate, validate(uuidParamSchema), connectionController.deleteConnection);
 
 /**
  * @route   POST /api/connections/:id/sync-schema
  * @desc    Manually trigger schema sync for a connection
  * @access  Private
  */
-router.post('/:id/sync-schema', authenticate, heavyRateLimit, connectionController.syncSchema);
+router.post('/:id/sync-schema', authenticate, heavyRateLimit, validate(uuidParamSchema), connectionController.syncSchema);
 
 // ============================================
 // DATABASE SCHEMA ROUTES (PostgreSQL schemas: public, analytics, etc.)

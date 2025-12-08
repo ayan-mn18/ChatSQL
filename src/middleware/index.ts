@@ -12,7 +12,10 @@ export {
   deleteAccountSchema,
   updateProfileSchema, 
   paginationSchema, 
-  uuidParamSchema 
+  uuidParamSchema,
+  testConnectionSchema,
+  createConnectionSchema,
+  updateConnectionSchema
 } from './validator';
 export {
   rateLimit,

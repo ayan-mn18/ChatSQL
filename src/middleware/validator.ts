@@ -132,6 +132,84 @@ export const updateProfileSchema = {
 };
 
 // ============================================
+// CONNECTION VALIDATION SCHEMAS
+// ============================================
+export const testConnectionSchema = {
+  body: z.object({
+    host: z.string()
+      .min(1, 'Host is required')
+      .max(255, 'Host must be less than 255 characters'),
+    port: z.number()
+      .int('Port must be an integer')
+      .min(1, 'Port must be at least 1')
+      .max(65535, 'Port must be at most 65535'),
+    db_name: z.string()
+      .min(1, 'Database name is required')
+      .max(128, 'Database name must be less than 128 characters'),
+    username: z.string()
+      .min(1, 'Username is required')
+      .max(128, 'Username must be less than 128 characters'),
+    password: z.string()
+      .min(1, 'Password is required'),
+    ssl: z.boolean().optional().default(false)
+  })
+};
+
+export const createConnectionSchema = {
+  body: z.object({
+    name: z.string()
+      .min(1, 'Connection name is required')
+      .max(100, 'Connection name must be less than 100 characters'),
+    host: z.string()
+      .min(1, 'Host is required')
+      .max(255, 'Host must be less than 255 characters'),
+    port: z.number()
+      .int('Port must be an integer')
+      .min(1, 'Port must be at least 1')
+      .max(65535, 'Port must be at most 65535'),
+    db_name: z.string()
+      .min(1, 'Database name is required')
+      .max(128, 'Database name must be less than 128 characters'),
+    username: z.string()
+      .min(1, 'Username is required')
+      .max(128, 'Username must be less than 128 characters'),
+    password: z.string()
+      .min(1, 'Password is required'),
+    ssl: z.boolean().optional().default(false)
+  })
+};
+
+export const updateConnectionSchema = {
+  body: z.object({
+    name: z.string()
+      .min(1, 'Connection name is required')
+      .max(100, 'Connection name must be less than 100 characters')
+      .optional(),
+    host: z.string()
+      .min(1, 'Host is required')
+      .max(255, 'Host must be less than 255 characters')
+      .optional(),
+    port: z.number()
+      .int('Port must be an integer')
+      .min(1, 'Port must be at least 1')
+      .max(65535, 'Port must be at most 65535')
+      .optional(),
+    db_name: z.string()
+      .min(1, 'Database name is required')
+      .max(128, 'Database name must be less than 128 characters')
+      .optional(),
+    username: z.string()
+      .min(1, 'Username is required')
+      .max(128, 'Username must be less than 128 characters')
+      .optional(),
+    password: z.string()
+      .min(1, 'Password is required')
+      .optional(),
+    ssl: z.boolean().optional()
+  })
+};
+
+// ============================================
 // COMMON VALIDATION SCHEMAS
 // ============================================
 export const paginationSchema = {

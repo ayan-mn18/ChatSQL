@@ -1,5 +1,7 @@
 import { Request, Response } from 'express';
+import { Sequelize, QueryTypes } from 'sequelize';
 import { logger } from '../utils/logger';
+import { TestConnectionRequest, TestConnectionResponse } from '../types';
 
 // ============================================
 // CONNECTION CONTROLLER
@@ -7,42 +9,205 @@ import { logger } from '../utils/logger';
 // ============================================
 
 /**
+ * Create a temporary Sequelize instance for testing connections
+ */
+const createTempConnection = (config: TestConnectionRequest): Sequelize => {
+  return new Sequelize({
+    dialect: 'postgres',
+    host: config.host,
+    port: config.port,
+    database: config.db_name,
+    username: config.username,
+    password: config.password,
+    ssl: config.ssl,
+    dialectOptions: config.ssl ? {
+      ssl: {
+        require: true,
+        rejectUnauthorized: false // Allow self-signed certs
+      }
+    } : {},
+    logging: false,
+    pool: {
+      max: 1,
+      min: 0,
+      acquire: 10000, // 10 second timeout
+      idle: 1000
+    }
+  });
+};
+
+/**
+ * Map PostgreSQL error codes to user-friendly messages
+ */
+const mapPgError = (error: any): { message: string; code: string } => {
+  const pgCode = error.parent?.code || error.original?.code;
+  
+  switch (pgCode) {
+    case '28P01': // Invalid password
+    case '28000': // Invalid authorization specification
+      return {
+        message: 'Authentication failed. Please check your username and password.',
+        code: 'AUTH_FAILED'
+      };
+    case '3D000': // Database does not exist
+      return {
+        message: `Database "${error.parent?.message?.match(/"([^"]+)"/)?.[1] || 'specified'}" does not exist.`,
+        code: 'DATABASE_NOT_FOUND'
+      };
+    case 'ENOTFOUND': // DNS resolution failed
+    case 'EAI_AGAIN':
+      return {
+        message: 'Could not resolve the host address. Please verify the hostname.',
+        code: 'HOST_NOT_FOUND'
+      };
+    case 'ECONNREFUSED':
+      return {
+        message: 'Connection refused. Please check if the database server is running and the port is correct.',
+        code: 'CONNECTION_REFUSED'
+      };
+    case 'ETIMEDOUT':
+    case 'ESOCKETTIMEDOUT':
+      return {
+        message: 'Connection timed out. The server might be unreachable or behind a firewall.',
+        code: 'CONNECTION_TIMEOUT'
+      };
+    case 'EHOSTUNREACH':
+      return {
+        message: 'Host is unreachable. Please check your network connection and firewall settings.',
+        code: 'HOST_UNREACHABLE'
+      };
+    case '42501': // Insufficient privilege
+      return {
+        message: 'User does not have sufficient privileges to connect.',
+        code: 'INSUFFICIENT_PRIVILEGES'
+      };
+    case '53300': // Too many connections
+      return {
+        message: 'Too many connections to the database. Please try again later.',
+        code: 'TOO_MANY_CONNECTIONS'
+      };
+    case 'DEPTH_ZERO_SELF_SIGNED_CERT':
+    case 'UNABLE_TO_VERIFY_LEAF_SIGNATURE':
+      return {
+        message: 'SSL certificate verification failed. Try enabling SSL with self-signed certificate support.',
+        code: 'SSL_CERT_ERROR'
+      };
+    default:
+      // Check error name/message for common patterns
+      if (error.name === 'SequelizeConnectionRefusedError') {
+        return {
+          message: 'Connection refused. Please check if the database server is running and the port is correct.',
+          code: 'CONNECTION_REFUSED'
+        };
+      }
+      if (error.name === 'SequelizeConnectionTimedOutError') {
+        return {
+          message: 'Connection timed out. The server might be unreachable or behind a firewall.',
+          code: 'CONNECTION_TIMEOUT'
+        };
+      }
+      if (error.name === 'SequelizeHostNotFoundError') {
+        return {
+          message: 'Could not resolve the host address. Please verify the hostname.',
+          code: 'HOST_NOT_FOUND'
+        };
+      }
+      if (error.name === 'SequelizeAccessDeniedError') {
+        return {
+          message: 'Authentication failed. Please check your username and password.',
+          code: 'AUTH_FAILED'
+        };
+      }
+      
+      return {
+        message: error.message || 'Failed to connect to the database.',
+        code: 'CONNECTION_ERROR'
+      };
+  }
+};
+
+/**
  * @route   POST /api/connections/test
  * @desc    Test a database connection (without saving)
  * @access  Private
  * 
- * STEPS:
- * 1. Validate request body (host, port, db_name, username, password)
- * 2. Attempt to connect to PostgreSQL using provided credentials
- * 3. If successful, return latency and success message
- * 4. If failed, return specific error (auth error, timeout, network error)
- * 5. Close connection immediately after test
+ * Tests the provided database credentials and returns:
+ * - Connection success/failure
+ * - Latency in milliseconds
+ * - Available PostgreSQL schemas (if successful)
  */
 export const testConnection = async (req: Request, res: Response): Promise<void> => {
+  const startTime = Date.now();
+  let sequelize: Sequelize | null = null;
+  
   try {
-    logger.info('[CONNECTION] Test connection request received');
+    const { host, port, db_name, username, password, ssl } = req.body as TestConnectionRequest;
     
-    // TODO: Implement connection test logic
-    // const { host, port, db_name, username, password, ssl } = req.body;
-    // 1. Validate input
-    // 2. Create temporary Sequelize/pg connection
-    // 3. await sequelize.authenticate()
-    // 4. Measure latency
-    // 5. Close connection
-    // 6. Return result
-
-    res.status(501).json({
-      success: false,
-      error: 'Not implemented yet',
-      code: 'NOT_IMPLEMENTED'
+    logger.info('[CONNECTION] Testing connection', {
+      host,
+      port,
+      db_name,
+      username,
+      ssl: !!ssl
     });
+    
+    // Create temporary connection
+    sequelize = createTempConnection({ host, port, db_name, username, password, ssl });
+    
+    // Test authentication
+    await sequelize.authenticate();
+    
+    const latencyMs = Date.now() - startTime;
+    logger.info(`[CONNECTION] Connection successful in ${latencyMs}ms`);
+    
+    // Fetch available schemas (excluding system schemas)
+    const schemas = await sequelize.query<{ schema_name: string }>(
+      `SELECT schema_name 
+       FROM information_schema.schemata 
+       WHERE schema_name NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
+       ORDER BY schema_name`,
+      { type: QueryTypes.SELECT }
+    );
+    
+    const schemaNames = schemas.map(s => s.schema_name);
+    
+    const response: TestConnectionResponse = {
+      success: true,
+      message: 'Connection successful',
+      latency_ms: latencyMs,
+      schemas: schemaNames
+    };
+    
+    res.status(200).json(response);
   } catch (error: any) {
-    logger.error('[CONNECTION] Test connection failed:', error);
-    res.status(500).json({
-      success: false,
-      error: error.message || 'Failed to test connection',
-      code: 'CONNECTION_TEST_ERROR'
+    const latencyMs = Date.now() - startTime;
+    const mappedError = mapPgError(error);
+    
+    logger.warn('[CONNECTION] Connection test failed', {
+      error: error.message,
+      code: mappedError.code,
+      latency_ms: latencyMs
     });
+    
+    const response: TestConnectionResponse = {
+      success: false,
+      message: mappedError.message,
+      error: mappedError.message,
+      code: mappedError.code,
+      latency_ms: latencyMs
+    };
+    
+    res.status(400).json(response);
+  } finally {
+    // Always close the connection
+    if (sequelize) {
+      try {
+        await sequelize.close();
+        logger.debug('[CONNECTION] Temporary connection closed');
+      } catch (closeError) {
+        logger.warn('[CONNECTION] Failed to close temporary connection', closeError);
+      }
+    }
   }
 };
 

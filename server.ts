@@ -259,7 +259,8 @@ app.use(errorHandler);
 // Start the server and listen on the specified port
 app.listen(PORT, async () => {
   // Log a message when the server is successfully running
-  await connectDatabase();
+  console.log('Cors allowed for:', env.CORS_ORIGIN || "https://sql.bizer.dev");
   console.log(`🚀 Server is running on http://localhost:${PORT}`);
-  console.log(`📚 Environment: ${process.env.NODE_ENV || 'development'}`);
+  console.log(`📚 Environment: ${env.NODE_ENV || 'development'}`);
+  await connectDatabase();
 });

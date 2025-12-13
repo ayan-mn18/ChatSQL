@@ -1,4 +1,5 @@
 import { Queue, Worker, Job } from 'bullmq';
+import { Sequelize, QueryTypes } from 'sequelize';
 import { 
   QUEUE_NAMES, 
   SCHEMA_SYNC_JOBS,
@@ -11,7 +12,10 @@ import {
   SchemaSyncJobType,
 } from '../config/queue';
 import { bullMQConnection, getRedisClient } from '../config/redis';
+import { sequelize } from '../config/db';
+import { decrypt } from '../utils/encryption';
 import { logger } from '../utils/logger';
+import { TableColumnDef, IndexDef } from '../types';
 
 // ============================================
 // SCHEMA SYNC QUEUE
@@ -217,11 +221,475 @@ export async function publishJobError(userId: string, jobId: string, connectionI
 }
 
 // ============================================
-// WORKER (Job Processor) - Stub Implementation
+// WORKER (Job Processor) - Full Implementation
 // ============================================
 
-// Note: The actual worker implementation will be in schema-sync.worker.ts
-// This is the job processor that will be started separately
+/**
+ * Create a temporary Sequelize connection to user's external database
+ */
+const createUserDbConnection = (config: {
+  host: string;
+  port: number;
+  db_name: string;
+  username: string;
+  password: string;
+  ssl: boolean;
+}): Sequelize => {
+  return new Sequelize({
+    dialect: 'postgres',
+    host: config.host,
+    port: config.port,
+    database: config.db_name,
+    username: config.username,
+    password: config.password,
+    ssl: config.ssl,
+    dialectOptions: config.ssl ? {
+      ssl: {
+        require: true,
+        rejectUnauthorized: false
+      }
+    } : {},
+    logging: false,
+    pool: {
+      max: 5,
+      min: 0,
+      acquire: 30000,
+      idle: 10000
+    }
+  });
+};
+
+/**
+ * Fetch connection details from our database
+ */
+async function fetchConnectionDetails(connectionId: string): Promise<{
+  id: string;
+  user_id: string;
+  name: string;
+  host: string;
+  port: number;
+  db_name: string;
+  username: string;
+  password_enc: string;
+  ssl: boolean;
+} | null> {
+  const result = await sequelize.query<{
+    id: string;
+    user_id: string;
+    name: string;
+    host: string;
+    port: number;
+    db_name: string;
+    username: string;
+    password_enc: string;
+    ssl: boolean;
+  }>(
+    `SELECT id, user_id, name, host, port, db_name, username, password_enc, ssl 
+     FROM connections WHERE id = $1`,
+    {
+      bind: [connectionId],
+      type: QueryTypes.SELECT
+    }
+  );
+  
+  return result[0] || null;
+}
+
+/**
+ * Fetch all schemas from user's database
+ */
+async function fetchSchemas(userDb: Sequelize): Promise<string[]> {
+  const schemas = await userDb.query<{ schema_name: string }>(
+    `SELECT schema_name 
+     FROM information_schema.schemata 
+     WHERE schema_name NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
+     ORDER BY schema_name`,
+    { type: QueryTypes.SELECT }
+  );
+  
+  return schemas.map(s => s.schema_name);
+}
+
+/**
+ * Fetch all tables for a schema from user's database
+ */
+async function fetchTablesForSchema(userDb: Sequelize, schemaName: string): Promise<Array<{
+  table_name: string;
+  table_type: string;
+}>> {
+  const tables = await userDb.query<{
+    table_name: string;
+    table_type: string;
+  }>(
+    `SELECT table_name, table_type 
+     FROM information_schema.tables 
+     WHERE table_schema = $1 
+       AND table_type IN ('BASE TABLE', 'VIEW')
+     ORDER BY table_name`,
+    {
+      bind: [schemaName],
+      type: QueryTypes.SELECT
+    }
+  );
+  
+  return tables;
+}
+
+/**
+ * Fetch columns for a table
+ */
+async function fetchColumnsForTable(userDb: Sequelize, schemaName: string, tableName: string): Promise<TableColumnDef[]> {
+  // Get column info
+  const columns = await userDb.query<{
+    column_name: string;
+    data_type: string;
+    udt_name: string;
+    is_nullable: string;
+    column_default: string | null;
+    character_maximum_length: number | null;
+    numeric_precision: number | null;
+  }>(
+    `SELECT column_name, data_type, udt_name, is_nullable, column_default, 
+            character_maximum_length, numeric_precision
+     FROM information_schema.columns 
+     WHERE table_schema = $1 AND table_name = $2
+     ORDER BY ordinal_position`,
+    {
+      bind: [schemaName, tableName],
+      type: QueryTypes.SELECT
+    }
+  );
+
+  // Get primary key columns
+  const pkResult = await userDb.query<{ column_name: string }>(
+    `SELECT a.attname as column_name
+     FROM pg_index i
+     JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey)
+     JOIN pg_class c ON c.oid = i.indrelid
+     JOIN pg_namespace n ON n.oid = c.relnamespace
+     WHERE i.indisprimary = true
+       AND n.nspname = $1
+       AND c.relname = $2`,
+    {
+      bind: [schemaName, tableName],
+      type: QueryTypes.SELECT
+    }
+  );
+  const pkColumns = new Set(pkResult.map(r => r.column_name));
+
+  // Get foreign key info
+  const fkResult = await userDb.query<{
+    column_name: string;
+    foreign_table_schema: string;
+    foreign_table_name: string;
+    foreign_column_name: string;
+  }>(
+    `SELECT 
+       kcu.column_name,
+       ccu.table_schema AS foreign_table_schema,
+       ccu.table_name AS foreign_table_name,
+       ccu.column_name AS foreign_column_name
+     FROM information_schema.table_constraints AS tc
+     JOIN information_schema.key_column_usage AS kcu
+       ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema
+     JOIN information_schema.constraint_column_usage AS ccu
+       ON ccu.constraint_name = tc.constraint_name
+     WHERE tc.constraint_type = 'FOREIGN KEY'
+       AND tc.table_schema = $1
+       AND tc.table_name = $2`,
+    {
+      bind: [schemaName, tableName],
+      type: QueryTypes.SELECT
+    }
+  );
+  const fkMap = new Map(fkResult.map(fk => [fk.column_name, {
+    table: fk.foreign_table_name,
+    column: fk.foreign_column_name,
+    schema: fk.foreign_table_schema
+  }]));
+
+  return columns.map(col => ({
+    name: col.column_name,
+    data_type: col.character_maximum_length 
+      ? `${col.data_type}(${col.character_maximum_length})`
+      : col.data_type,
+    udt_name: col.udt_name,
+    is_nullable: col.is_nullable === 'YES',
+    is_primary_key: pkColumns.has(col.column_name),
+    is_foreign_key: fkMap.has(col.column_name),
+    foreign_key_ref: fkMap.get(col.column_name),
+    default_value: col.column_default || undefined,
+    max_length: col.character_maximum_length || undefined,
+    numeric_precision: col.numeric_precision || undefined,
+  }));
+}
+
+/**
+ * Fetch indexes for a table
+ */
+async function fetchIndexesForTable(userDb: Sequelize, schemaName: string, tableName: string): Promise<IndexDef[]> {
+  const indexes = await userDb.query<{
+    index_name: string;
+    column_name: string;
+    is_unique: boolean;
+    is_primary: boolean;
+    index_type: string;
+  }>(
+    `SELECT 
+       i.relname AS index_name,
+       a.attname AS column_name,
+       ix.indisunique AS is_unique,
+       ix.indisprimary AS is_primary,
+       am.amname AS index_type
+     FROM pg_class t
+     JOIN pg_namespace n ON n.oid = t.relnamespace
+     JOIN pg_index ix ON t.oid = ix.indrelid
+     JOIN pg_class i ON i.oid = ix.indexrelid
+     JOIN pg_am am ON i.relam = am.oid
+     JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = ANY(ix.indkey)
+     WHERE n.nspname = $1
+       AND t.relname = $2
+     ORDER BY i.relname, a.attnum`,
+    {
+      bind: [schemaName, tableName],
+      type: QueryTypes.SELECT
+    }
+  );
+
+  // Group by index name
+  const indexMap = new Map<string, IndexDef>();
+  for (const idx of indexes) {
+    if (!indexMap.has(idx.index_name)) {
+      indexMap.set(idx.index_name, {
+        name: idx.index_name,
+        columns: [],
+        is_unique: idx.is_unique,
+        is_primary: idx.is_primary,
+        type: idx.index_type
+      });
+    }
+    indexMap.get(idx.index_name)!.columns.push(idx.column_name);
+  }
+
+  return Array.from(indexMap.values());
+}
+
+/**
+ * Fetch foreign key relationships for all tables in schema
+ */
+async function fetchRelationsForSchema(userDb: Sequelize, schemaName: string): Promise<Array<{
+  constraint_name: string;
+  source_table: string;
+  source_column: string;
+  target_schema: string;
+  target_table: string;
+  target_column: string;
+}>> {
+  const relations = await userDb.query<{
+    constraint_name: string;
+    source_table: string;
+    source_column: string;
+    target_schema: string;
+    target_table: string;
+    target_column: string;
+  }>(
+    `SELECT 
+       tc.constraint_name,
+       tc.table_name AS source_table,
+       kcu.column_name AS source_column,
+       ccu.table_schema AS target_schema,
+       ccu.table_name AS target_table,
+       ccu.column_name AS target_column
+     FROM information_schema.table_constraints AS tc
+     JOIN information_schema.key_column_usage AS kcu
+       ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema
+     JOIN information_schema.constraint_column_usage AS ccu
+       ON ccu.constraint_name = tc.constraint_name
+     WHERE tc.constraint_type = 'FOREIGN KEY'
+       AND tc.table_schema = $1`,
+    {
+      bind: [schemaName],
+      type: QueryTypes.SELECT
+    }
+  );
+
+  return relations;
+}
+
+/**
+ * Process full schema sync job
+ */
+async function processFullSchemaSync(
+  job: Job<SyncFullSchemaJobData>,
+  connection: NonNullable<Awaited<ReturnType<typeof fetchConnectionDetails>>>
+): Promise<{ tablesProcessed: number; schemasProcessed: number }> {
+  const { connectionId, userId } = job.data;
+  
+  // Decrypt password
+  const password = decrypt(connection.password_enc);
+  
+  // Connect to user's database
+  const userDb = createUserDbConnection({
+    host: connection.host,
+    port: connection.port,
+    db_name: connection.db_name,
+    username: connection.username,
+    password,
+    ssl: connection.ssl
+  });
+
+  try {
+    await userDb.authenticate();
+    logger.info(`[SCHEMA_SYNC_WORKER] Connected to user database: ${connection.db_name}`);
+
+    // Fetch all schemas
+    const schemas = await fetchSchemas(userDb);
+    logger.info(`[SCHEMA_SYNC_WORKER] Found ${schemas.length} schemas`);
+
+    await publishJobProgress(userId, {
+      jobId: job.id!,
+      type: 'schema-sync',
+      connectionId,
+      progress: 10,
+      message: `Found ${schemas.length} schemas`,
+      status: 'processing'
+    });
+
+    let totalTablesProcessed = 0;
+    let progressPerSchema = 80 / Math.max(schemas.length, 1);
+    let currentProgress = 10;
+
+    for (let schemaIndex = 0; schemaIndex < schemas.length; schemaIndex++) {
+      const schemaName = schemas[schemaIndex];
+      
+      // Upsert schema into database_schemas
+      await sequelize.query(
+        `INSERT INTO database_schemas (connection_id, schema_name, is_selected, last_synced_at)
+         VALUES ($1, $2, true, NOW())
+         ON CONFLICT (connection_id, schema_name) 
+         DO UPDATE SET last_synced_at = NOW(), updated_at = NOW()
+         RETURNING id`,
+        {
+          bind: [connectionId, schemaName],
+          type: QueryTypes.INSERT
+        }
+      );
+
+      // Fetch tables for this schema
+      const tables = await fetchTablesForSchema(userDb, schemaName);
+      logger.info(`[SCHEMA_SYNC_WORKER] Schema ${schemaName}: found ${tables.length} tables`);
+
+      // Update table_count in database_schemas
+      await sequelize.query(
+        `UPDATE database_schemas SET table_count = $1 WHERE connection_id = $2 AND schema_name = $3`,
+        { bind: [tables.length, connectionId, schemaName], type: QueryTypes.UPDATE }
+      );
+
+      // Process each table
+      for (const table of tables) {
+        const columns = await fetchColumnsForTable(userDb, schemaName, table.table_name);
+        const indexes = await fetchIndexesForTable(userDb, schemaName, table.table_name);
+        const pkColumns = columns.filter(c => c.is_primary_key).map(c => c.name);
+
+        // Get database_schema_id
+        const dbSchemaResult = await sequelize.query<{ id: string }>(
+          `SELECT id FROM database_schemas WHERE connection_id = $1 AND schema_name = $2`,
+          { bind: [connectionId, schemaName], type: QueryTypes.SELECT }
+        );
+        const databaseSchemaId = dbSchemaResult[0]?.id;
+
+        // Upsert table into table_schemas
+        await sequelize.query(
+          `INSERT INTO table_schemas 
+             (connection_id, database_schema_id, schema_name, table_name, table_type, columns, primary_key_columns, indexes, last_fetched_at)
+           VALUES 
+             ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8::jsonb, NOW())
+           ON CONFLICT (connection_id, schema_name, table_name) 
+           DO UPDATE SET 
+             database_schema_id = EXCLUDED.database_schema_id,
+             table_type = EXCLUDED.table_type,
+             columns = EXCLUDED.columns,
+             primary_key_columns = EXCLUDED.primary_key_columns,
+             indexes = EXCLUDED.indexes,
+             last_fetched_at = NOW(),
+             updated_at = NOW()`,
+          {
+            bind: [
+              connectionId,
+              databaseSchemaId,
+              schemaName,
+              table.table_name,
+              table.table_type,
+              JSON.stringify(columns),
+              JSON.stringify(pkColumns),
+              JSON.stringify(indexes)
+            ],
+            type: QueryTypes.INSERT
+          }
+        );
+
+        totalTablesProcessed++;
+      }
+
+      // Fetch and store relations for this schema
+      const relations = await fetchRelationsForSchema(userDb, schemaName);
+      for (const rel of relations) {
+        await sequelize.query(
+          `INSERT INTO erd_relations 
+             (connection_id, source_schema, source_table, source_column, target_schema, target_table, target_column, constraint_name)
+           VALUES 
+             ($1, $2, $3, $4, $5, $6, $7, $8)
+           ON CONFLICT (connection_id, source_schema, source_table, source_column, target_table, target_column) 
+           DO UPDATE SET 
+             constraint_name = EXCLUDED.constraint_name`,
+          {
+            bind: [
+              connectionId,
+              schemaName,
+              rel.source_table,
+              rel.source_column,
+              rel.target_schema,
+              rel.target_table,
+              rel.target_column,
+              rel.constraint_name
+            ],
+            type: QueryTypes.INSERT
+          }
+        );
+      }
+
+      currentProgress += progressPerSchema;
+      await job.updateProgress(Math.round(currentProgress));
+      
+      await publishJobProgress(userId, {
+        jobId: job.id!,
+        type: 'schema-sync',
+        connectionId,
+        schemaName,
+        progress: Math.round(currentProgress),
+        message: `Processed schema ${schemaName} (${tables.length} tables)`,
+        status: 'processing'
+      });
+    }
+
+    // Update connection as synced
+    await sequelize.query(
+      `UPDATE connections SET schema_synced = true, schema_synced_at = NOW(), updated_at = NOW() WHERE id = $1`,
+      { bind: [connectionId], type: QueryTypes.UPDATE }
+    );
+
+    await job.updateProgress(100);
+    
+    return {
+      tablesProcessed: totalTablesProcessed,
+      schemasProcessed: schemas.length
+    };
+
+  } finally {
+    await userDb.close();
+    logger.debug(`[SCHEMA_SYNC_WORKER] Closed connection to user database`);
+  }
+}
 
 export function createSchemaSyncWorker(): Worker<SchemaSyncJobData> {
   const worker = new Worker<SchemaSyncJobData>(
@@ -232,9 +700,14 @@ export function createSchemaSyncWorker(): Worker<SchemaSyncJobData> {
       const { type, connectionId, userId } = job.data;
 
       try {
+        // Fetch connection from DB
+        const connection = await fetchConnectionDetails(connectionId);
+        if (!connection) {
+          throw new Error(`Connection ${connectionId} not found`);
+        }
+
         switch (type) {
-          case SCHEMA_SYNC_JOBS.SYNC_FULL_SCHEMA:
-            // TODO: Implement in Phase 2
+          case SCHEMA_SYNC_JOBS.SYNC_FULL_SCHEMA: {
             await publishJobProgress(userId, {
               jobId: job.id!,
               type: 'schema-sync',
@@ -244,24 +717,43 @@ export function createSchemaSyncWorker(): Worker<SchemaSyncJobData> {
               status: 'processing',
             });
             
-            // Placeholder - will be implemented in Phase 2
-            logger.info(`[SCHEMA_SYNC_WORKER] Full schema sync for ${connectionId} - Not implemented yet`);
+            const result = await processFullSchemaSync(job as Job<SyncFullSchemaJobData>, connection);
             
-            await job.updateProgress(100);
             await publishJobComplete(userId, job.id!, connectionId, true);
-            return { success: true, message: 'Schema sync placeholder completed' };
+            
+            logger.info(`[SCHEMA_SYNC_WORKER] Full schema sync completed`, {
+              connectionId,
+              schemasProcessed: result.schemasProcessed,
+              tablesProcessed: result.tablesProcessed
+            });
+            
+            return { 
+              success: true, 
+              message: `Schema sync completed: ${result.schemasProcessed} schemas, ${result.tablesProcessed} tables`,
+              ...result
+            };
+          }
 
           case SCHEMA_SYNC_JOBS.SYNC_SINGLE_SCHEMA:
-            logger.info(`[SCHEMA_SYNC_WORKER] Single schema sync - Not implemented yet`);
+            // TODO: Implement single schema sync
+            logger.info(`[SCHEMA_SYNC_WORKER] Single schema sync - Not fully implemented yet`);
             return { success: true, message: 'Single schema sync placeholder' };
 
           case SCHEMA_SYNC_JOBS.SYNC_SINGLE_TABLE:
-            logger.info(`[SCHEMA_SYNC_WORKER] Single table sync - Not implemented yet`);
+            // TODO: Implement single table sync
+            logger.info(`[SCHEMA_SYNC_WORKER] Single table sync - Not fully implemented yet`);
             return { success: true, message: 'Single table sync placeholder' };
 
           case SCHEMA_SYNC_JOBS.REFRESH_SCHEMA:
-            logger.info(`[SCHEMA_SYNC_WORKER] Refresh schema - Not implemented yet`);
-            return { success: true, message: 'Refresh schema placeholder' };
+            // Refresh is same as full sync but we don't delete existing data first
+            logger.info(`[SCHEMA_SYNC_WORKER] Refresh schema - Using full sync`);
+            const refreshResult = await processFullSchemaSync(job as Job<SyncFullSchemaJobData>, connection);
+            await publishJobComplete(userId, job.id!, connectionId, true);
+            return { 
+              success: true, 
+              message: `Schema refresh completed: ${refreshResult.schemasProcessed} schemas, ${refreshResult.tablesProcessed} tables`,
+              ...refreshResult
+            };
 
           default:
             throw new Error(`Unknown job type: ${type}`);

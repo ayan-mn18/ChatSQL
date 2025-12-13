@@ -1,7 +1,18 @@
 import { Request, Response } from 'express';
 import { Sequelize, QueryTypes } from 'sequelize';
 import { logger } from '../utils/logger';
-import { TestConnectionRequest, TestConnectionResponse } from '../types';
+import { sequelize } from '../config/db';
+import { encrypt, decrypt } from '../utils/encryption';
+import { addSyncFullSchemaJob, cancelJobsForConnection } from '../queues/schema-sync.queue';
+import { getRedisClient } from '../config/redis';
+import { 
+  TestConnectionRequest, 
+  TestConnectionResponse,
+  CreateConnectionRequest,
+  UpdateConnectionRequest,
+  ConnectionPublic,
+  ApiResponse
+} from '../types';
 
 // ============================================
 // CONNECTION CONTROLLER
@@ -232,26 +243,135 @@ export const testConnection = async (req: Request, res: Response): Promise<void>
  * - Update connection.schema_synced = true
  */
 export const createConnection = async (req: Request, res: Response): Promise<void> => {
+  let testSequelize: Sequelize | null = null;
+  
   try {
-    logger.info('[CONNECTION] Create connection request received');
     const userId = req.userId;
-    
-    // TODO: Implement connection creation logic
-    // const { name, host, port, db_name, username, password, ssl } = req.body;
-    // 1. Validate input (use zod schema)
-    // 2. Test connection first
-    // 3. Encrypt password: const passwordEnc = encrypt(password)
-    // 4. Insert into DB:
-    //    INSERT INTO connections (user_id, name, host, port, type, db_name, username, password_enc, is_valid)
-    //    VALUES ($1, $2, $3, $4, 'postgres', $5, $6, $7, true)
-    // 5. Queue schema sync job (or do it inline for MVP)
-    // 6. Return connection without password
+    if (!userId) {
+      res.status(401).json({
+        success: false,
+        error: 'User not authenticated',
+        code: 'UNAUTHORIZED'
+      });
+      return;
+    }
 
-    res.status(501).json({
-      success: false,
-      error: 'Not implemented yet',
-      code: 'NOT_IMPLEMENTED'
+    const { name, host, port, db_name, username, password, ssl = false } = req.body as CreateConnectionRequest;
+    
+    logger.info('[CONNECTION] Create connection request received', {
+      userId,
+      name,
+      host,
+      port,
+      db_name,
+      ssl
     });
+
+    // Validate required fields
+    if (!name || !host || !port || !db_name || !username || !password) {
+      res.status(400).json({
+        success: false,
+        error: 'Missing required fields: name, host, port, db_name, username, password',
+        code: 'VALIDATION_ERROR'
+      });
+      return;
+    }
+
+    // Check for duplicate connection name
+    const existingConnection = await sequelize.query<{ id: string }>(
+      `SELECT id FROM connections WHERE user_id = $1 AND name = $2`,
+      {
+        bind: [userId, name],
+        type: QueryTypes.SELECT
+      }
+    );
+
+    if (existingConnection.length > 0) {
+      res.status(409).json({
+        success: false,
+        error: `A connection named "${name}" already exists`,
+        code: 'DUPLICATE_CONNECTION_NAME'
+      });
+      return;
+    }
+
+    // Step 2: Test connection first (fail fast)
+    logger.info('[CONNECTION] Testing connection before saving...');
+    testSequelize = createTempConnection({ host, port, db_name, username, password, ssl });
+    
+    try {
+      await testSequelize.authenticate();
+      logger.info('[CONNECTION] Connection test successful');
+    } catch (testError: any) {
+      const mappedError = mapPgError(testError);
+      logger.warn('[CONNECTION] Connection test failed, not saving', {
+        error: mappedError.message,
+        code: mappedError.code
+      });
+      
+      res.status(400).json({
+        success: false,
+        error: mappedError.message,
+        code: mappedError.code
+      });
+      return;
+    } finally {
+      if (testSequelize) {
+        await testSequelize.close();
+        testSequelize = null;
+      }
+    }
+
+    // Step 3: Encrypt password
+    const passwordEnc = encrypt(password);
+    logger.debug('[CONNECTION] Password encrypted successfully');
+
+    // Step 4: Insert into database
+    const insertResult = await sequelize.query<ConnectionPublic>(
+      `INSERT INTO connections 
+        (user_id, name, host, port, type, db_name, username, password_enc, ssl, is_valid, last_tested_at)
+       VALUES 
+        ($1, $2, $3, $4, 'postgres', $5, $6, $7, $8, true, NOW())
+       RETURNING 
+        id, user_id, name, host, port, type, db_name, username, ssl, 
+        is_valid, schema_synced, schema_synced_at, last_tested_at, created_at, updated_at`,
+      {
+        bind: [userId, name, host, port, db_name, username, passwordEnc, ssl],
+        type: QueryTypes.SELECT  // Use SELECT for INSERT...RETURNING
+      }
+    );
+
+    // Get the first row from the result
+    const connection = insertResult[0] as ConnectionPublic;
+    
+    logger.info('[CONNECTION] Connection saved successfully', {
+      connectionId: connection.id,
+      name: connection.name
+    });
+
+    // Step 5: Queue schema sync job
+    const job = await addSyncFullSchemaJob({
+      connectionId: connection.id,
+      userId,
+      connectionName: name
+    });
+
+    logger.info('[CONNECTION] Schema sync job queued', {
+      connectionId: connection.id,
+      jobId: job.id
+    });
+
+    // Step 6: Return connection (without password)
+    const response: ApiResponse<{ connection: ConnectionPublic; jobId: string | undefined }> = {
+      success: true,
+      message: 'Connection created successfully. Schema sync job queued.',
+      data: {
+        connection,
+        jobId: job.id
+      }
+    };
+
+    res.status(201).json(response);
   } catch (error: any) {
     logger.error('[CONNECTION] Create connection failed:', error);
     res.status(500).json({
@@ -275,20 +395,38 @@ export const createConnection = async (req: Request, res: Response): Promise<voi
  */
 export const getAllConnections = async (req: Request, res: Response): Promise<void> => {
   try {
-    logger.info('[CONNECTION] Get all connections request received');
     const userId = req.userId;
     
-    // TODO: Implement get all connections logic
-    // SELECT id, name, host, port, type, db_name, username, is_valid, 
-    //        schema_synced, last_tested_at, created_at, updated_at
-    // FROM connections
-    // WHERE user_id = $1
-    // ORDER BY created_at DESC
+    if (!userId) {
+      res.status(401).json({
+        success: false,
+        error: 'User not authenticated',
+        code: 'UNAUTHORIZED'
+      });
+      return;
+    }
 
-    res.status(501).json({
-      success: false,
-      error: 'Not implemented yet',
-      code: 'NOT_IMPLEMENTED'
+    logger.info('[CONNECTION] Get all connections request', { userId });
+
+    const connections = await sequelize.query<ConnectionPublic>(
+      `SELECT id, user_id, name, host, port, type, db_name, username, ssl,
+              is_valid, schema_synced, schema_synced_at, last_tested_at, 
+              created_at, updated_at
+       FROM connections
+       WHERE user_id = $1
+       ORDER BY created_at DESC`,
+      {
+        bind: [userId],
+        type: QueryTypes.SELECT
+      }
+    );
+
+    logger.info(`[CONNECTION] Found ${connections.length} connections for user`, { userId });
+
+    res.status(200).json({
+      success: true,
+      data: connections,
+      count: connections.length
     });
   } catch (error: any) {
     logger.error('[CONNECTION] Get all connections failed:', error);
@@ -314,19 +452,53 @@ export const getAllConnections = async (req: Request, res: Response): Promise<vo
  */
 export const getConnectionById = async (req: Request, res: Response): Promise<void> => {
   try {
-    logger.info('[CONNECTION] Get connection by ID request received');
     const { id } = req.params;
     const userId = req.userId;
     
-    // TODO: Implement get connection by ID logic
-    // SELECT * FROM connections WHERE id = $1 AND user_id = $2
-    // If not found: return 404
-    // Remove password_enc from response
+    if (!userId) {
+      res.status(401).json({
+        success: false,
+        error: 'User not authenticated',
+        code: 'UNAUTHORIZED'
+      });
+      return;
+    }
 
-    res.status(501).json({
-      success: false,
-      error: 'Not implemented yet',
-      code: 'NOT_IMPLEMENTED'
+    if (!id) {
+      res.status(400).json({
+        success: false,
+        error: 'Connection ID is required',
+        code: 'VALIDATION_ERROR'
+      });
+      return;
+    }
+
+    logger.info('[CONNECTION] Get connection by ID request', { id, userId });
+
+    const connections = await sequelize.query<ConnectionPublic>(
+      `SELECT id, user_id, name, host, port, type, db_name, username, ssl,
+              is_valid, schema_synced, schema_synced_at, last_tested_at, 
+              created_at, updated_at
+       FROM connections
+       WHERE id = $1 AND user_id = $2`,
+      {
+        bind: [id, userId],
+        type: QueryTypes.SELECT
+      }
+    );
+
+    if (connections.length === 0) {
+      res.status(404).json({
+        success: false,
+        error: 'Connection not found',
+        code: 'CONNECTION_NOT_FOUND'
+      });
+      return;
+    }
+
+    res.status(200).json({
+      success: true,
+      data: connections[0]
     });
   } catch (error: any) {
     logger.error('[CONNECTION] Get connection by ID failed:', error);
@@ -366,24 +538,228 @@ export const getConnectionById = async (req: Request, res: Response): Promise<vo
  * - ssl options - needs re-test
  */
 export const updateConnection = async (req: Request, res: Response): Promise<void> => {
+  let testSequelize: Sequelize | null = null;
+  
   try {
-    logger.info('[CONNECTION] Update connection request received');
     const { id } = req.params;
     const userId = req.userId;
     
-    // TODO: Implement update connection logic
-    // 1. Fetch existing connection
-    // 2. Merge updates
-    // 3. If connection params changed, re-test
-    // 4. If password changed, re-encrypt
-    // 5. UPDATE connections SET ... WHERE id = $1 AND user_id = $2
-    // 6. If host/port/db changed, queue schema re-sync
-    // 7. Return updated connection without password
+    if (!userId) {
+      res.status(401).json({
+        success: false,
+        error: 'User not authenticated',
+        code: 'UNAUTHORIZED'
+      });
+      return;
+    }
 
-    res.status(501).json({
-      success: false,
-      error: 'Not implemented yet',
-      code: 'NOT_IMPLEMENTED'
+    if (!id) {
+      res.status(400).json({
+        success: false,
+        error: 'Connection ID is required',
+        code: 'VALIDATION_ERROR'
+      });
+      return;
+    }
+
+    const { name, host, port, db_name, username, password, ssl } = req.body as UpdateConnectionRequest;
+
+    logger.info('[CONNECTION] Update connection request', { id, userId, name });
+
+    // Fetch existing connection (including encrypted password for re-test)
+    const existingConnections = await sequelize.query<{
+      id: string;
+      name: string;
+      host: string;
+      port: number;
+      db_name: string;
+      username: string;
+      password_enc: string;
+      ssl: boolean;
+    }>(
+      `SELECT id, name, host, port, db_name, username, password_enc, ssl
+       FROM connections
+       WHERE id = $1 AND user_id = $2`,
+      {
+        bind: [id, userId],
+        type: QueryTypes.SELECT
+      }
+    );
+
+    if (existingConnections.length === 0) {
+      res.status(404).json({
+        success: false,
+        error: 'Connection not found',
+        code: 'CONNECTION_NOT_FOUND'
+      });
+      return;
+    }
+
+    const existing = existingConnections[0];
+    
+    // Check if connection-critical fields changed
+    const connectionFieldsChanged = 
+      (host !== undefined && host !== existing.host) ||
+      (port !== undefined && port !== existing.port) ||
+      (db_name !== undefined && db_name !== existing.db_name) ||
+      (username !== undefined && username !== existing.username) ||
+      (password !== undefined) ||
+      (ssl !== undefined && ssl !== existing.ssl);
+
+    // Check if name is being changed to one that already exists
+    if (name && name !== existing.name) {
+      const duplicateCheck = await sequelize.query<{ id: string }>(
+        `SELECT id FROM connections WHERE user_id = $1 AND name = $2 AND id != $3`,
+        {
+          bind: [userId, name, id],
+          type: QueryTypes.SELECT
+        }
+      );
+
+      if (duplicateCheck.length > 0) {
+        res.status(409).json({
+          success: false,
+          error: `A connection named "${name}" already exists`,
+          code: 'DUPLICATE_CONNECTION_NAME'
+        });
+        return;
+      }
+    }
+
+    // If connection params changed, re-test the connection
+    if (connectionFieldsChanged) {
+      const testConfig = {
+        host: host ?? existing.host,
+        port: port ?? existing.port,
+        db_name: db_name ?? existing.db_name,
+        username: username ?? existing.username,
+        password: password ?? decrypt(existing.password_enc),
+        ssl: ssl ?? existing.ssl
+      };
+
+      logger.info('[CONNECTION] Connection fields changed, re-testing...');
+      testSequelize = createTempConnection(testConfig);
+      
+      try {
+        await testSequelize.authenticate();
+        logger.info('[CONNECTION] Connection re-test successful');
+      } catch (testError: any) {
+        const mappedError = mapPgError(testError);
+        logger.warn('[CONNECTION] Connection re-test failed', {
+          error: mappedError.message,
+          code: mappedError.code
+        });
+        
+        res.status(400).json({
+          success: false,
+          error: mappedError.message,
+          code: mappedError.code
+        });
+        return;
+      } finally {
+        if (testSequelize) {
+          await testSequelize.close();
+          testSequelize = null;
+        }
+      }
+    }
+
+    // Build dynamic UPDATE query
+    const updates: string[] = [];
+    const values: any[] = [];
+    let paramIndex = 1;
+
+    if (name !== undefined) {
+      updates.push(`name = $${paramIndex++}`);
+      values.push(name);
+    }
+    if (host !== undefined) {
+      updates.push(`host = $${paramIndex++}`);
+      values.push(host);
+    }
+    if (port !== undefined) {
+      updates.push(`port = $${paramIndex++}`);
+      values.push(port);
+    }
+    if (db_name !== undefined) {
+      updates.push(`db_name = $${paramIndex++}`);
+      values.push(db_name);
+    }
+    if (username !== undefined) {
+      updates.push(`username = $${paramIndex++}`);
+      values.push(username);
+    }
+    if (password !== undefined) {
+      updates.push(`password_enc = $${paramIndex++}`);
+      values.push(encrypt(password));
+    }
+    if (ssl !== undefined) {
+      updates.push(`ssl = $${paramIndex++}`);
+      values.push(ssl);
+    }
+
+    // If connection params changed, update is_valid and last_tested_at
+    if (connectionFieldsChanged) {
+      updates.push(`is_valid = true`);
+      updates.push(`last_tested_at = NOW()`);
+      // Reset schema_synced if database connection changed
+      if ((host !== undefined && host !== existing.host) ||
+          (port !== undefined && port !== existing.port) ||
+          (db_name !== undefined && db_name !== existing.db_name)) {
+        updates.push(`schema_synced = false`);
+        updates.push(`schema_synced_at = NULL`);
+      }
+    }
+
+    updates.push(`updated_at = NOW()`);
+
+    // Add id and user_id to values
+    values.push(id);
+    values.push(userId);
+
+    const updateResult = await sequelize.query<ConnectionPublic>(
+      `UPDATE connections 
+       SET ${updates.join(', ')}
+       WHERE id = $${paramIndex++} AND user_id = $${paramIndex++}
+       RETURNING id, user_id, name, host, port, type, db_name, username, ssl,
+                 is_valid, schema_synced, schema_synced_at, last_tested_at, 
+                 created_at, updated_at`,
+      {
+        bind: values,
+        type: QueryTypes.SELECT
+      }
+    );
+
+    const updatedConnection = updateResult[0];
+
+    // Queue schema re-sync if database connection changed
+    const databaseChanged = 
+      (host !== undefined && host !== existing.host) ||
+      (port !== undefined && port !== existing.port) ||
+      (db_name !== undefined && db_name !== existing.db_name);
+
+    let jobId: string | undefined;
+    if (databaseChanged) {
+      const job = await addSyncFullSchemaJob({
+        connectionId: id,
+        userId,
+        connectionName: updatedConnection.name
+      });
+      jobId = job.id;
+      logger.info('[CONNECTION] Schema re-sync job queued', { connectionId: id, jobId });
+    }
+
+    logger.info('[CONNECTION] Connection updated successfully', { connectionId: id });
+
+    res.status(200).json({
+      success: true,
+      message: databaseChanged 
+        ? 'Connection updated. Schema sync job queued.' 
+        : 'Connection updated successfully.',
+      data: {
+        connection: updatedConnection,
+        ...(jobId && { jobId })
+      }
     });
   } catch (error: any) {
     logger.error('[CONNECTION] Update connection failed:', error);
@@ -410,22 +786,87 @@ export const updateConnection = async (req: Request, res: Response): Promise<voi
  */
 export const deleteConnection = async (req: Request, res: Response): Promise<void> => {
   try {
-    logger.info('[CONNECTION] Delete connection request received');
     const { id } = req.params;
     const userId = req.userId;
     
-    // TODO: Implement delete connection logic
-    // 1. Verify ownership: SELECT id FROM connections WHERE id = $1 AND user_id = $2
-    // 2. If not found, return 404
-    // 3. DELETE FROM connections WHERE id = $1
-    // 4. CASCADE will handle table_schemas, erd_relations, queries, etc.
-    // 5. Clear Redis cache: redis.del(`connection:${id}:*`)
-    // 6. Return success
+    if (!userId) {
+      res.status(401).json({
+        success: false,
+        error: 'User not authenticated',
+        code: 'UNAUTHORIZED'
+      });
+      return;
+    }
 
-    res.status(501).json({
-      success: false,
-      error: 'Not implemented yet',
-      code: 'NOT_IMPLEMENTED'
+    if (!id) {
+      res.status(400).json({
+        success: false,
+        error: 'Connection ID is required',
+        code: 'VALIDATION_ERROR'
+      });
+      return;
+    }
+
+    logger.info('[CONNECTION] Delete connection request', { id, userId });
+
+    // Verify ownership and get connection name for logging
+    const existingConnections = await sequelize.query<{ id: string; name: string }>(
+      `SELECT id, name FROM connections WHERE id = $1 AND user_id = $2`,
+      {
+        bind: [id, userId],
+        type: QueryTypes.SELECT
+      }
+    );
+
+    if (existingConnections.length === 0) {
+      res.status(404).json({
+        success: false,
+        error: 'Connection not found',
+        code: 'CONNECTION_NOT_FOUND'
+      });
+      return;
+    }
+
+    const connectionName = existingConnections[0].name;
+
+    // Cancel any pending schema sync jobs for this connection
+    try {
+      const cancelledJobs = await cancelJobsForConnection(id);
+      if (cancelledJobs > 0) {
+        logger.info(`[CONNECTION] Cancelled ${cancelledJobs} pending jobs for connection`, { id });
+      }
+    } catch (cancelError) {
+      logger.warn('[CONNECTION] Failed to cancel pending jobs', { id, error: cancelError });
+      // Continue with deletion even if job cancellation fails
+    }
+
+    // Delete connection (CASCADE will handle related tables)
+    await sequelize.query(
+      `DELETE FROM connections WHERE id = $1 AND user_id = $2`,
+      {
+        bind: [id, userId],
+        type: QueryTypes.DELETE
+      }
+    );
+
+    // Clear Redis cache for this connection (if redis is available)
+    try {
+      const redis = getRedisClient();
+      const keys = await redis.keys(`connection:${id}:*`);
+      if (keys.length > 0) {
+        await redis.del(...keys);
+        logger.debug(`[CONNECTION] Cleared ${keys.length} cached keys for connection`, { id });
+      }
+    } catch (redisError) {
+      logger.warn('[CONNECTION] Failed to clear Redis cache', { id, error: redisError });
+      // Continue even if cache clear fails
+    }
+
+    logger.info('[CONNECTION] Connection deleted successfully', { id, name: connectionName });
+
+    res.status(200).json({
+      success: true,
+      message: `Connection "${connectionName}" deleted successfully`
     });
   } catch (error: any) {
     logger.error('[CONNECTION] Delete connection failed:', error);

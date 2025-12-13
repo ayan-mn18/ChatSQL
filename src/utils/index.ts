@@ -1,4 +1,5 @@
 export * from './auth';
+export * from './cache';
 export * from './encryption';
 export * from './logger';
 

@@ -6,11 +6,21 @@ import { encrypt, decrypt } from '../utils/encryption';
 import { addSyncFullSchemaJob, cancelJobsForConnection } from '../queues/schema-sync.queue';
 import { getRedisClient } from '../config/redis';
 import { 
+  getFromCache, 
+  setCache, 
+  deleteCache, 
+  invalidateConnectionCache, 
+  CACHE_KEYS, 
+  CACHE_TTL 
+} from '../utils/cache';
+import { 
   TestConnectionRequest, 
   TestConnectionResponse,
   CreateConnectionRequest,
   UpdateConnectionRequest,
   ConnectionPublic,
+  DatabaseSchemaPublic,
+  TableSchema,
   ApiResponse
 } from '../types';
 
@@ -976,30 +986,85 @@ export const syncSchema = async (req: Request, res: Response): Promise<void> => 
 
 /**
  * @route   GET /api/connections/:id/schemas
- * @desc    Get all PostgreSQL schemas for a connection
+ * @desc    Get all PostgreSQL schemas for a connection (with Redis caching)
  * @access  Private
  * 
  * STEPS:
  * 1. Verify connection exists and belongs to user
- * 2. Query database_schemas WHERE connection_id = $1
- * 3. Return list with table counts and selection status
+ * 2. Check Redis cache first
+ * 3. If cache miss, query database_schemas table
+ * 4. Cache result and return
  */
 export const getSchemas = async (req: Request, res: Response): Promise<void> => {
   try {
-    logger.info('[CONNECTION] Get schemas request received');
     const { id } = req.params;
     const userId = req.userId;
+    logger.info(`[CONNECTION] Get schemas request for connection: ${id}`);
     
-    // TODO: Implement get schemas logic
-    // SELECT schema_name, is_selected, table_count, last_synced_at
-    // FROM database_schemas
-    // WHERE connection_id = $1
-    // ORDER BY schema_name
-
-    res.status(501).json({
-      success: false,
-      error: 'Not implemented yet',
-      code: 'NOT_IMPLEMENTED'
+    // 1. Verify connection exists and belongs to user
+    const [connectionResult] = await sequelize.query<{ id: string }>(
+      `SELECT id FROM connections WHERE id = :id AND user_id = :userId`,
+      {
+        replacements: { id, userId },
+        type: QueryTypes.SELECT
+      }
+    );
+    
+    if (!connectionResult) {
+      logger.warn(`[CONNECTION] Connection not found or unauthorized: ${id}`);
+      res.status(404).json({
+        success: false,
+        error: 'Connection not found',
+        code: 'CONNECTION_NOT_FOUND'
+      });
+      return;
+    }
+    
+    // 2. Check Redis cache first
+    const cacheKey = CACHE_KEYS.schemas(id);
+    const cached = await getFromCache<DatabaseSchemaPublic[]>(cacheKey);
+    
+    if (cached) {
+      logger.info(`[CONNECTION] Returning cached schemas for connection: ${id}`);
+      res.json({
+        success: true,
+        schemas: cached.data,
+        total_schemas: cached.data.length,
+        cached: true,
+        cachedAt: cached.cachedAt
+      });
+      return;
+    }
+    
+    // 3. Cache miss - query database
+    const schemas = await sequelize.query<DatabaseSchemaPublic>(
+      `SELECT 
+        id,
+        schema_name,
+        is_selected,
+        table_count,
+        description,
+        last_synced_at
+      FROM database_schemas
+      WHERE connection_id = :connectionId
+      ORDER BY 
+        CASE WHEN schema_name = 'public' THEN 0 ELSE 1 END,
+        schema_name`,
+      {
+        replacements: { connectionId: id },
+        type: QueryTypes.SELECT
+      }
+    );
+    
+    // 4. Cache result
+    await setCache(cacheKey, schemas, CACHE_TTL.SCHEMAS);
+    
+    logger.info(`[CONNECTION] Fetched ${schemas.length} schemas for connection: ${id}`);
+    res.json({
+      success: true,
+      schemas,
+      total_schemas: schemas.length,
+      cached: false
     });
   } catch (error: any) {
     logger.error('[CONNECTION] Get schemas failed:', error);
@@ -1020,26 +1085,100 @@ export const getSchemas = async (req: Request, res: Response): Promise<void> => 
  * 1. Verify connection exists and belongs to user
  * 2. Validate request body (array of schema selections)
  * 3. Update is_selected for each schema in database_schemas
- * 4. Invalidate Redis cache for this connection
+ * 4. Invalidate Redis cache for this connection's schemas
  * 5. Return updated schemas list
  */
 export const updateSchemas = async (req: Request, res: Response): Promise<void> => {
   try {
-    logger.info('[CONNECTION] Update schemas request received');
     const { id } = req.params;
     const userId = req.userId;
-    const { schemas } = req.body; // [{ schema_name: 'public', is_selected: true }, ...]
+    const { schemas } = req.body as { schemas: Array<{ schema_name: string; is_selected: boolean }> };
     
-    // TODO: Implement update schemas logic
-    // For each schema in request:
-    //   UPDATE database_schemas 
-    //   SET is_selected = $1, updated_at = NOW()
-    //   WHERE connection_id = $2 AND schema_name = $3
-
-    res.status(501).json({
-      success: false,
-      error: 'Not implemented yet',
-      code: 'NOT_IMPLEMENTED'
+    logger.info(`[CONNECTION] Update schemas request for connection: ${id}`);
+    
+    // Validate request body
+    if (!schemas || !Array.isArray(schemas) || schemas.length === 0) {
+      res.status(400).json({
+        success: false,
+        error: 'Invalid request body. Expected { schemas: [{ schema_name, is_selected }] }',
+        code: 'INVALID_REQUEST'
+      });
+      return;
+    }
+    
+    // 1. Verify connection exists and belongs to user
+    const [connectionResult] = await sequelize.query<{ id: string }>(
+      `SELECT id FROM connections WHERE id = :id AND user_id = :userId`,
+      {
+        replacements: { id, userId },
+        type: QueryTypes.SELECT
+      }
+    );
+    
+    if (!connectionResult) {
+      logger.warn(`[CONNECTION] Connection not found or unauthorized: ${id}`);
+      res.status(404).json({
+        success: false,
+        error: 'Connection not found',
+        code: 'CONNECTION_NOT_FOUND'
+      });
+      return;
+    }
+    
+    // 2. Update each schema's is_selected status in a transaction
+    await sequelize.transaction(async (t) => {
+      for (const schema of schemas) {
+        await sequelize.query(
+          `UPDATE database_schemas 
+           SET is_selected = :isSelected, updated_at = NOW()
+           WHERE connection_id = :connectionId AND schema_name = :schemaName`,
+          {
+            replacements: {
+              isSelected: schema.is_selected,
+              connectionId: id,
+              schemaName: schema.schema_name
+            },
+            transaction: t,
+            type: QueryTypes.UPDATE
+          }
+        );
+      }
+    });
+    
+    // 3. Invalidate Redis cache for schemas
+    const cacheKey = CACHE_KEYS.schemas(id);
+    await deleteCache(cacheKey);
+    logger.info(`[CONNECTION] Invalidated schema cache for connection: ${id}`);
+    
+    // 4. Fetch and return updated schemas
+    const updatedSchemas = await sequelize.query<DatabaseSchemaPublic>(
+      `SELECT 
+        id,
+        schema_name,
+        is_selected,
+        table_count,
+        description,
+        last_synced_at
+      FROM database_schemas
+      WHERE connection_id = :connectionId
+      ORDER BY 
+        CASE WHEN schema_name = 'public' THEN 0 ELSE 1 END,
+        schema_name`,
+      {
+        replacements: { connectionId: id },
+        type: QueryTypes.SELECT
+      }
+    );
+    
+    // 5. Cache the new result
+    await setCache(cacheKey, updatedSchemas, CACHE_TTL.SCHEMAS);
+    
+    logger.info(`[CONNECTION] Updated ${schemas.length} schema selections for connection: ${id}`);
+    res.json({
+      success: true,
+      message: `Updated ${schemas.length} schema selections`,
+      schemas: updatedSchemas,
+      total_schemas: updatedSchemas.length
     });
   } catch (error: any) {
     logger.error('[CONNECTION] Update schemas failed:', error);
@@ -1053,32 +1192,94 @@ export const updateSchemas = async (req: Request, res: Response): Promise<void> 
 
 /**
  * @route   GET /api/connections/:id/schemas/:schemaName/tables
- * @desc    Get all tables for a specific PostgreSQL schema
+ * @desc    Get all tables for a specific PostgreSQL schema (with Redis caching)
  * @access  Private
  * 
  * STEPS:
  * 1. Verify connection exists and belongs to user
- * 2. Query table_schemas WHERE connection_id = $1 AND schema_name = $2
- * 3. Include columns, primary keys, and foreign key refs
- * 4. Return tables with full metadata
+ * 2. Check Redis cache first
+ * 3. If cache miss, query table_schemas table
+ * 4. Cache result and return
  */
 export const getTablesBySchema = async (req: Request, res: Response): Promise<void> => {
   try {
-    logger.info('[CONNECTION] Get tables by schema request received');
     const { id, schemaName } = req.params;
     const userId = req.userId;
+    logger.info(`[CONNECTION] Get tables request for connection: ${id}, schema: ${schemaName}`);
     
-    // TODO: Implement get tables by schema logic
-    // SELECT id, table_name, table_type, columns, primary_key_columns, 
-    //        row_count, table_size_bytes, description
-    // FROM table_schemas
-    // WHERE connection_id = $1 AND schema_name = $2
-    // ORDER BY table_name
-
-    res.status(501).json({
-      success: false,
-      error: 'Not implemented yet',
-      code: 'NOT_IMPLEMENTED'
+    // 1. Verify connection exists and belongs to user
+    const [connectionResult] = await sequelize.query<{ id: string }>(
+      `SELECT id FROM connections WHERE id = :id AND user_id = :userId`,
+      {
+        replacements: { id, userId },
+        type: QueryTypes.SELECT
+      }
+    );
+    
+    if (!connectionResult) {
+      logger.warn(`[CONNECTION] Connection not found or unauthorized: ${id}`);
+      res.status(404).json({
+        success: false,
+        error: 'Connection not found',
+        code: 'CONNECTION_NOT_FOUND'
+      });
+      return;
+    }
+    
+    // 2. Check Redis cache first
+    const cacheKey = CACHE_KEYS.tables(id, schemaName);
+    const cached = await getFromCache<TableSchema[]>(cacheKey);
+    
+    if (cached) {
+      logger.info(`[CONNECTION] Returning cached tables for connection: ${id}, schema: ${schemaName}`);
+      res.json({
+        success: true,
+        schema_name: schemaName,
+        tables: cached.data,
+        total_tables: cached.data.length,
+        cached: true,
+        cachedAt: cached.cachedAt
+      });
+      return;
+    }
+    
+    // 3. Cache miss - query database
+    const tables = await sequelize.query<TableSchema>(
+      `SELECT 
+        id,
+        connection_id,
+        database_schema_id,
+        schema_name,
+        table_name,
+        table_type,
+        columns,
+        primary_key_columns,
+        indexes,
+        row_count,
+        table_size_bytes,
+        description,
+        last_fetched_at,
+        created_at,
+        updated_at
+      FROM table_schemas
+      WHERE connection_id = :connectionId AND schema_name = :schemaName
+      ORDER BY table_name`,
+      {
+        replacements: { connectionId: id, schemaName },
+        type: QueryTypes.SELECT
+      }
+    );
+    
+    // 4. Cache result
+    await setCache(cacheKey, tables, CACHE_TTL.TABLES);
+    
+    logger.info(`[CONNECTION] Fetched ${tables.length} tables for connection: ${id}, schema: ${schemaName}`);
+    res.json({
+      success: true,
+      schema_name: schemaName,
+      tables,
+      total_tables: tables.length,
+      cached: false
     });
   } catch (error: any) {
     logger.error('[CONNECTION] Get tables by schema failed:', error);
@@ -1086,6 +1287,101 @@ export const getTablesBySchema = async (req: Request, res: Response): Promise<vo
       success: false,
       error: error.message || 'Failed to get tables',
       code: 'TABLES_FETCH_ERROR'
+    });
+  }
+};
+
+/**
+ * @route   GET /api/connections/:id/relations
+ * @desc    Get all ERD relations (foreign keys) for a connection (with Redis caching)
+ * @access  Private
+ * 
+ * STEPS:
+ * 1. Verify connection exists and belongs to user
+ * 2. Check Redis cache first
+ * 3. If cache miss, query erd_relations table
+ * 4. Cache result and return
+ */
+export const getRelations = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const { id } = req.params;
+    const userId = req.userId;
+    logger.info(`[CONNECTION] Get ERD relations request for connection: ${id}`);
+    
+    // 1. Verify connection exists and belongs to user
+    const [connectionResult] = await sequelize.query<{ id: string }>(
+      `SELECT id FROM connections WHERE id = :id AND user_id = :userId`,
+      {
+        replacements: { id, userId },
+        type: QueryTypes.SELECT
+      }
+    );
+    
+    if (!connectionResult) {
+      logger.warn(`[CONNECTION] Connection not found or unauthorized: ${id}`);
+      res.status(404).json({
+        success: false,
+        error: 'Connection not found',
+        code: 'CONNECTION_NOT_FOUND'
+      });
+      return;
+    }
+    
+    // 2. Check Redis cache first
+    const cacheKey = `connection:${id}:relations`;
+    const cached = await getFromCache<any[]>(cacheKey);
+    
+    if (cached) {
+      logger.info(`[CONNECTION] Returning cached ERD relations for connection: ${id}`);
+      res.json({
+        success: true,
+        relations: cached.data,
+        total_relations: cached.data.length,
+        cached: true,
+        cachedAt: cached.cachedAt
+      });
+      return;
+    }
+    
+    // 3. Cache miss - query database
+    const relations = await sequelize.query(
+      `SELECT 
+        id,
+        connection_id,
+        source_schema,
+        source_table,
+        source_column,
+        target_schema,
+        target_table,
+        target_column,
+        constraint_name,
+        relation_type,
+        created_at
+      FROM erd_relations
+      WHERE connection_id = :connectionId
+      ORDER BY source_table, source_column`,
+      {
+        replacements: { connectionId: id },
+        type: QueryTypes.SELECT
+      }
+    );
+    
+    // 4. Cache result (5 minute TTL like other schema data)
+    await setCache(cacheKey, relations, CACHE_TTL.SCHEMAS);
+    
+    logger.info(`[CONNECTION] Fetched ${relations.length} ERD relations for connection: ${id}`);
+    res.json({
+      success: true,
+      relations,
+      total_relations: relations.length,
+      cached: false
+    });
+  } catch (error: any) {
+    logger.error('[CONNECTION] Get ERD relations failed:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to get ERD relations',
+      code: 'RELATIONS_FETCH_ERROR'
     });
   }
 };

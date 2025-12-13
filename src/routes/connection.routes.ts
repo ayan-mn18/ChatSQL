@@ -90,4 +90,12 @@ router.put('/:id/schemas', authenticate, connectionController.updateSchemas);
  */
 router.get('/:id/schemas/:schemaName/tables', authenticate, connectionController.getTablesBySchema);
 
+/**
+ * @route   GET /api/connections/:id/relations
+ * @desc    Get all ERD relations (foreign keys) for a connection
+ * @access  Private
+ * @returns List of foreign key relationships for ERD visualization
+ */
+router.get('/:id/relations', authenticate, connectionController.getRelations);
+
 export default router;

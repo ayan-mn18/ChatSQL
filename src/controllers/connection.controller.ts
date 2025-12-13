@@ -4,6 +4,18 @@ import { logger } from '../utils/logger';
 import { sequelize } from '../config/db';
 import { encrypt, decrypt } from '../utils/encryption';
 import { addSyncFullSchemaJob, cancelJobsForConnection } from '../queues/schema-sync.queue';
+import { 
+  addSelectQueryJob, 
+  addUpdateRowJob, 
+  addInsertRowJob, 
+  addDeleteRowJob,
+  addExecuteRawSQLJob,
+  waitForJobResult,
+  SelectQueryResult,
+  MutationResult,
+  FilterCondition,
+  ColumnUpdate,
+} from '../queues/db-operations.queue';
 import { getRedisClient } from '../config/redis';
 import { 
   getFromCache, 
@@ -1382,6 +1394,496 @@ export const getRelations = async (req: Request, res: Response): Promise<void> =
       success: false,
       error: error.message || 'Failed to get ERD relations',
       code: 'RELATIONS_FETCH_ERROR'
+    });
+  }
+};
+
+// ============================================
+// TABLE DATA OPERATIONS (via DB Operations Queue)
+// ============================================
+
+/**
+ * Get table data with pagination and sorting
+ * GET /api/connections/:id/tables/:schema/:table/data
+ * 
+ * Query params:
+ * - page: number (default: 1)
+ * - pageSize: number (default: 50, max: 100)
+ * - sortBy: string (column name)
+ * - sortOrder: 'ASC' | 'DESC' (default: ASC)
+ * - filters: JSON string of FilterCondition[]
+ */
+export const getTableData = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const { id, schema, table } = req.params;
+    const userId = req.userId;
+    
+    // Parse query params
+    const page = Math.max(1, parseInt(req.query.page as string) || 1);
+    const pageSize = Math.min(100, Math.max(1, parseInt(req.query.pageSize as string) || 50));
+    const sortBy = req.query.sortBy as string | undefined;
+    const sortOrder = (req.query.sortOrder as string)?.toUpperCase() === 'DESC' ? 'DESC' : 'ASC';
+    
+    let filters: FilterCondition[] = [];
+    if (req.query.filters) {
+      try {
+        filters = JSON.parse(req.query.filters as string);
+      } catch {
+        // Invalid JSON, ignore filters
+      }
+    }
+    
+    logger.info(`[CONNECTION] Get table data request: ${schema}.${table} (page ${page})`);
+    
+    // 1. Verify connection exists and belongs to user
+    const [connectionResult] = await sequelize.query<{ id: string }>(
+      `SELECT id FROM connections WHERE id = :id AND user_id = :userId`,
+      {
+        replacements: { id, userId },
+        type: QueryTypes.SELECT
+      }
+    );
+    
+    if (!connectionResult) {
+      logger.warn(`[CONNECTION] Connection not found or unauthorized: ${id}`);
+      res.status(404).json({
+        success: false,
+        error: 'Connection not found',
+        code: 'CONNECTION_NOT_FOUND'
+      });
+      return;
+    }
+    
+    // 2. Check cache for this specific query
+    const cacheKey = `connection:${id}:data:${schema}:${table}:p${page}:s${pageSize}:${sortBy || ''}_${sortOrder}:${JSON.stringify(filters)}`;
+    const cached = await getFromCache<SelectQueryResult>(cacheKey);
+    
+    if (cached) {
+      logger.info(`[CONNECTION] Returning cached table data for ${schema}.${table}`);
+      res.json({
+        success: true,
+        ...cached.data,
+        cached: true,
+        cachedAt: cached.cachedAt
+      });
+      return;
+    }
+    
+    // 3. Get primary key column for this table (needed for row operations)
+    const [pkInfo] = await sequelize.query<{ primary_key_columns: string[] | null }>(
+      `SELECT ts.primary_key_columns
+       FROM table_schemas ts
+       JOIN database_schemas ds ON ts.database_schema_id = ds.id
+       WHERE ds.connection_id = :connectionId 
+         AND ds.schema_name = :schema 
+         AND ts.table_name = :table`,
+      {
+        replacements: { connectionId: id, schema, table },
+        type: QueryTypes.SELECT
+      }
+    );
+    
+    // Extract first primary key column, default to 'id'
+    const primaryKeyColumn = pkInfo?.primary_key_columns?.[0] || 'id';
+    
+    // 4. Add job to queue and wait for result
+    const job = await addSelectQueryJob({
+      connectionId: id,
+      userId: userId!,
+      schemaName: schema,
+      tableName: table,
+      page,
+      pageSize,
+      sortBy,
+      sortOrder,
+      filters,
+    });
+    
+    // Wait for job result (30 second timeout)
+    const result = await waitForJobResult<SelectQueryResult>(job, 30000);
+    
+    // 5. Cache the result (shorter TTL for data - 1 minute)
+    await setCache(cacheKey, result, 60);
+    
+    logger.info(`[CONNECTION] Retrieved ${result.rows.length} rows from ${schema}.${table}`);
+    res.json({
+      success: true,
+      ...result,
+      primaryKeyColumn,
+      cached: false
+    });
+  } catch (error: any) {
+    logger.error('[CONNECTION] Get table data failed:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to get table data',
+      code: 'TABLE_DATA_FETCH_ERROR'
+    });
+  }
+};
+
+/**
+ * Update a row in a table
+ * PUT /api/connections/:id/tables/:schema/:table/data/:rowId
+ * 
+ * Body:
+ * - primaryKeyColumn: string (column name of primary key)
+ * - updates: ColumnUpdate[] (array of column updates)
+ */
+export const updateTableRow = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const { id, schema, table, rowId } = req.params;
+    const userId = req.userId;
+    const { primaryKeyColumn, updates } = req.body;
+    
+    logger.info(`[CONNECTION] Update row request: ${schema}.${table}/${rowId}`);
+    
+    // Validate input
+    if (!primaryKeyColumn) {
+      res.status(400).json({
+        success: false,
+        error: 'Primary key column is required',
+        code: 'VALIDATION_ERROR'
+      });
+      return;
+    }
+    
+    if (!updates || !Array.isArray(updates) || updates.length === 0) {
+      res.status(400).json({
+        success: false,
+        error: 'Updates array is required and must not be empty',
+        code: 'VALIDATION_ERROR'
+      });
+      return;
+    }
+    
+    // 1. Verify connection exists and belongs to user
+    const [connectionResult] = await sequelize.query<{ id: string }>(
+      `SELECT id FROM connections WHERE id = :id AND user_id = :userId`,
+      {
+        replacements: { id, userId },
+        type: QueryTypes.SELECT
+      }
+    );
+    
+    if (!connectionResult) {
+      res.status(404).json({
+        success: false,
+        error: 'Connection not found',
+        code: 'CONNECTION_NOT_FOUND'
+      });
+      return;
+    }
+    
+    // 2. Add job to queue and wait for result
+    const job = await addUpdateRowJob({
+      connectionId: id,
+      userId: userId!,
+      schemaName: schema,
+      tableName: table,
+      primaryKeyColumn,
+      primaryKeyValue: rowId,
+      updates: updates as ColumnUpdate[],
+    });
+    
+    // Wait for job result
+    const result = await waitForJobResult<MutationResult>(job, 30000);
+    
+    logger.info(`[CONNECTION] Updated row in ${schema}.${table}: ${result.message}`);
+    res.json({
+      ...result,
+      jobId: job.id
+    });
+  } catch (error: any) {
+    logger.error('[CONNECTION] Update row failed:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to update row',
+      code: 'UPDATE_ROW_ERROR'
+    });
+  }
+};
+
+/**
+ * Insert a new row into a table
+ * POST /api/connections/:id/tables/:schema/:table/data
+ * 
+ * Body:
+ * - values: Record<string, any> (column name -> value)
+ */
+export const insertTableRow = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const { id, schema, table } = req.params;
+    const userId = req.userId;
+    const { values } = req.body;
+    
+    logger.info(`[CONNECTION] Insert row request: ${schema}.${table}`);
+    
+    // Validate input
+    if (!values || typeof values !== 'object' || Object.keys(values).length === 0) {
+      res.status(400).json({
+        success: false,
+        error: 'Values object is required and must not be empty',
+        code: 'VALIDATION_ERROR'
+      });
+      return;
+    }
+    
+    // 1. Verify connection exists and belongs to user
+    const [connectionResult] = await sequelize.query<{ id: string }>(
+      `SELECT id FROM connections WHERE id = :id AND user_id = :userId`,
+      {
+        replacements: { id, userId },
+        type: QueryTypes.SELECT
+      }
+    );
+    
+    if (!connectionResult) {
+      res.status(404).json({
+        success: false,
+        error: 'Connection not found',
+        code: 'CONNECTION_NOT_FOUND'
+      });
+      return;
+    }
+    
+    // 2. Add job to queue and wait for result
+    const job = await addInsertRowJob({
+      connectionId: id,
+      userId: userId!,
+      schemaName: schema,
+      tableName: table,
+      values,
+    });
+    
+    // Wait for job result
+    const result = await waitForJobResult<MutationResult>(job, 30000);
+    
+    logger.info(`[CONNECTION] Inserted row into ${schema}.${table}: ${result.message}`);
+    res.json({
+      ...result,
+      jobId: job.id
+    });
+  } catch (error: any) {
+    logger.error('[CONNECTION] Insert row failed:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to insert row',
+      code: 'INSERT_ROW_ERROR'
+    });
+  }
+};
+
+/**
+ * Delete a row from a table
+ * DELETE /api/connections/:id/tables/:schema/:table/data/:rowId
+ * 
+ * Body:
+ * - primaryKeyColumn: string (column name of primary key)
+ */
+export const deleteTableRow = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const { id, schema, table, rowId } = req.params;
+    const userId = req.userId;
+    const { primaryKeyColumn } = req.body;
+    
+    logger.info(`[CONNECTION] Delete row request: ${schema}.${table}/${rowId}`);
+    
+    // Validate input
+    if (!primaryKeyColumn) {
+      res.status(400).json({
+        success: false,
+        error: 'Primary key column is required',
+        code: 'VALIDATION_ERROR'
+      });
+      return;
+    }
+    
+    // 1. Verify connection exists and belongs to user
+    const [connectionResult] = await sequelize.query<{ id: string }>(
+      `SELECT id FROM connections WHERE id = :id AND user_id = :userId`,
+      {
+        replacements: { id, userId },
+        type: QueryTypes.SELECT
+      }
+    );
+    
+    if (!connectionResult) {
+      res.status(404).json({
+        success: false,
+        error: 'Connection not found',
+        code: 'CONNECTION_NOT_FOUND'
+      });
+      return;
+    }
+    
+    // 2. Add job to queue and wait for result
+    const job = await addDeleteRowJob({
+      connectionId: id,
+      userId: userId!,
+      schemaName: schema,
+      tableName: table,
+      primaryKeyColumn,
+      primaryKeyValue: rowId,
+    });
+    
+    // Wait for job result
+    const result = await waitForJobResult<MutationResult>(job, 30000);
+    
+    logger.info(`[CONNECTION] Deleted row from ${schema}.${table}: ${result.message}`);
+    res.json({
+      ...result,
+      jobId: job.id
+    });
+  } catch (error: any) {
+    logger.error('[CONNECTION] Delete row failed:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to delete row',
+      code: 'DELETE_ROW_ERROR'
+    });
+  }
+};
+
+/**
+ * Execute a raw SQL query (read-only by default)
+ * POST /api/connections/:id/query
+ * 
+ * Body:
+ * - query: string (SQL query)
+ * - readOnly: boolean (default: true)
+ */
+export const executeQuery = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const { id } = req.params;
+    const userId = req.userId;
+    const { query, readOnly = true } = req.body;
+    
+    logger.info(`[CONNECTION] Execute query request for connection: ${id}`);
+    
+    // Validate input
+    if (!query || typeof query !== 'string' || query.trim().length === 0) {
+      res.status(400).json({
+        success: false,
+        error: 'Query is required',
+        code: 'VALIDATION_ERROR'
+      });
+      return;
+    }
+    
+    // 1. Verify connection exists and belongs to user
+    const [connectionResult] = await sequelize.query<{ id: string }>(
+      `SELECT id FROM connections WHERE id = :id AND user_id = :userId`,
+      {
+        replacements: { id, userId },
+        type: QueryTypes.SELECT
+      }
+    );
+    
+    if (!connectionResult) {
+      res.status(404).json({
+        success: false,
+        error: 'Connection not found',
+        code: 'CONNECTION_NOT_FOUND'
+      });
+      return;
+    }
+    
+    // 2. Add job to queue and wait for result
+    const job = await addExecuteRawSQLJob({
+      connectionId: id,
+      userId: userId!,
+      query: query.trim(),
+      readOnly: !!readOnly,
+    });
+    
+    // Wait for job result (longer timeout for complex queries)
+    const result = await waitForJobResult<any>(job, 60000);
+    
+    logger.info(`[CONNECTION] Executed query, returned ${result.rowCount} rows in ${result.executionTime}ms`);
+    res.json({
+      success: true,
+      ...result,
+      jobId: job.id
+    });
+  } catch (error: any) {
+    logger.error('[CONNECTION] Execute query failed:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to execute query',
+      code: 'EXECUTE_QUERY_ERROR'
+    });
+  }
+};
+
+/**
+ * Get table columns with their metadata (for data entry forms)
+ * GET /api/connections/:id/tables/:schema/:table/columns
+ */
+export const getTableColumns = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const { id, schema, table } = req.params;
+    const userId = req.userId;
+    
+    logger.info(`[CONNECTION] Get table columns request: ${schema}.${table}`);
+    
+    // 1. Verify connection exists and belongs to user
+    const [connectionResult] = await sequelize.query<{ id: string }>(
+      `SELECT id FROM connections WHERE id = :id AND user_id = :userId`,
+      {
+        replacements: { id, userId },
+        type: QueryTypes.SELECT
+      }
+    );
+    
+    if (!connectionResult) {
+      res.status(404).json({
+        success: false,
+        error: 'Connection not found',
+        code: 'CONNECTION_NOT_FOUND'
+      });
+      return;
+    }
+    
+    // 2. Get columns from table_schemas
+    const [tableRow] = await sequelize.query<{ columns: any; primary_key_columns: string[] | null }>(
+      `SELECT ts.columns, ts.primary_key_columns
+       FROM table_schemas ts
+       JOIN database_schemas ds ON ts.database_schema_id = ds.id
+       WHERE ds.connection_id = :connectionId 
+         AND ds.schema_name = :schema 
+         AND ts.table_name = :table`,
+      {
+        replacements: { connectionId: id, schema, table },
+        type: QueryTypes.SELECT
+      }
+    );
+    
+    if (!tableRow) {
+      res.status(404).json({
+        success: false,
+        error: 'Table not found',
+        code: 'TABLE_NOT_FOUND'
+      });
+      return;
+    }
+    
+    // Extract first primary key column, default to 'id'
+    const primaryKey = tableRow.primary_key_columns?.[0] || 'id';
+    
+    res.json({
+      success: true,
+      columns: tableRow.columns,
+      primaryKey,
+      schemaName: schema,
+      tableName: table
+    });
+  } catch (error: any) {
+    logger.error('[CONNECTION] Get table columns failed:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to get table columns',
+      code: 'TABLE_COLUMNS_ERROR'
     });
   }
 };

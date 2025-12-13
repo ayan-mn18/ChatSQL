@@ -19,7 +19,7 @@ import { errorHandler, notFoundHandler, globalRateLimit } from './src/middleware
 import { corsConfig, env, checkRedisHealth, closeRedisConnections } from './src/config';
 
 // Import queue workers
-import { createSchemaSyncWorker, createAIOperationsWorker } from './src/queues';
+import { createSchemaSyncWorker, createAIOperationsWorker, createDBOperationsWorker } from './src/queues';
 
 import { logger } from './src/utils/logger';
 
@@ -275,6 +275,7 @@ app.use(errorHandler);
 // Queue workers (will be started after server starts)
 let schemaSyncWorker: ReturnType<typeof createSchemaSyncWorker> | null = null;
 let aiOperationsWorker: ReturnType<typeof createAIOperationsWorker> | null = null;
+let dbOperationsWorker: ReturnType<typeof createDBOperationsWorker> | null = null;
 
 // Graceful shutdown handler
 async function gracefulShutdown(signal: string) {
@@ -289,6 +290,11 @@ async function gracefulShutdown(signal: string) {
   if (aiOperationsWorker) {
     logger.info('[SERVER] Closing AI operations worker...');
     await aiOperationsWorker.close();
+  }
+  
+  if (dbOperationsWorker) {
+    logger.info('[SERVER] Closing DB operations worker...');
+    await dbOperationsWorker.close();
   }
   
   // Close Redis connections
@@ -320,6 +326,7 @@ app.listen(PORT, async () => {
     // Start workers
     schemaSyncWorker = createSchemaSyncWorker();
     aiOperationsWorker = createAIOperationsWorker();
+    dbOperationsWorker = createDBOperationsWorker();
     
     logger.info('[SERVER] ✅ Queue workers started');
     logger.info('[SERVER] 📊 Bull Board available at http://localhost:' + PORT + '/admin/queues');

@@ -4,6 +4,7 @@ import { BullMQAdapter } from '@bull-board/api/bullMQAdapter';
 import { ExpressAdapter } from '@bull-board/express';
 import { schemaSyncQueue } from '../queues/schema-sync.queue';
 import { aiOperationsQueue } from '../queues/ai-operations.queue';
+import { dbOperationsQueue } from '../queues/db-operations.queue';
 import { logger } from '../utils/logger';
 
 // ============================================
@@ -20,6 +21,7 @@ createBullBoard({
   queues: [
     new BullMQAdapter(schemaSyncQueue),
     new BullMQAdapter(aiOperationsQueue),
+    new BullMQAdapter(dbOperationsQueue),
   ],
   serverAdapter,
 });

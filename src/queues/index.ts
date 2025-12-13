@@ -46,3 +46,26 @@ export {
   type SuggestIndexesJobData,
   type AIJobResult,
 } from './ai-operations.queue';
+
+// DB Operations Queue
+export {
+  dbOperationsQueue,
+  dbOperationsQueueEvents,
+  addSelectQueryJob,
+  addUpdateRowJob,
+  addInsertRowJob,
+  addDeleteRowJob,
+  addExecuteRawSQLJob,
+  createDBOperationsWorker,
+  waitForJobResult,
+  type DBOperationJobData,
+  type SelectQueryJobData,
+  type UpdateRowJobData,
+  type InsertRowJobData,
+  type DeleteRowJobData,
+  type ExecuteRawSQLJobData,
+  type FilterCondition,
+  type ColumnUpdate,
+  type SelectQueryResult,
+  type MutationResult,
+} from './db-operations.queue';

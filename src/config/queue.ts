@@ -10,6 +10,7 @@ import { logger } from '../utils/logger';
 export const QUEUE_NAMES = {
   SCHEMA_SYNC: 'schema-sync',
   AI_OPERATIONS: 'ai-operations',
+  DB_OPERATIONS: 'db-operations',
 } as const;
 
 // Job types for Schema Sync Queue
@@ -26,6 +27,15 @@ export const AI_OPERATION_JOBS = {
   EXPLAIN_QUERY: 'explain-query',
   OPTIMIZE_QUERY: 'optimize-query',
   SUGGEST_INDEXES: 'suggest-indexes',
+} as const;
+
+// Job types for DB Operations Queue
+export const DB_OPERATION_JOBS = {
+  SELECT_QUERY: 'select-query',
+  UPDATE_ROW: 'update-row',
+  INSERT_ROW: 'insert-row',
+  DELETE_ROW: 'delete-row',
+  EXECUTE_RAW_SQL: 'execute-raw-sql',
 } as const;
 
 // Default job options for Schema Sync
@@ -60,10 +70,27 @@ export const aiOperationsJobDefaults = {
   },
 };
 
+// Default job options for DB Operations
+export const dbOperationsJobDefaults = {
+  attempts: 2,
+  backoff: {
+    type: 'fixed' as const,
+    delay: 1000,
+  },
+  removeOnComplete: {
+    age: 1800, // 30 minutes
+    count: 500,
+  },
+  removeOnFail: {
+    age: 3600, // 1 hour
+  },
+};
+
 // Worker concurrency settings
 export const WORKER_CONCURRENCY = {
   SCHEMA_SYNC: 2, // Don't overload external databases
   AI_OPERATIONS: 5, // Higher concurrency (mostly I/O wait)
+  DB_OPERATIONS: 10, // Higher concurrency for quick queries
 };
 
 // Rate limiter settings for workers
@@ -75,6 +102,10 @@ export const WORKER_RATE_LIMITS = {
   AI_OPERATIONS: {
     max: 30,
     duration: 60000, // 30 jobs per minute
+  },
+  DB_OPERATIONS: {
+    max: 100,
+    duration: 60000, // 100 jobs per minute per connection
   },
 };
 
@@ -127,3 +158,4 @@ export function createQueueEvents(name: string): QueueEvents {
 export type QueueName = typeof QUEUE_NAMES[keyof typeof QUEUE_NAMES];
 export type SchemaSyncJobType = typeof SCHEMA_SYNC_JOBS[keyof typeof SCHEMA_SYNC_JOBS];
 export type AIOperationJobType = typeof AI_OPERATION_JOBS[keyof typeof AI_OPERATION_JOBS];
+export type DBOperationJobType = typeof DB_OPERATION_JOBS[keyof typeof DB_OPERATION_JOBS];

@@ -98,4 +98,58 @@ router.get('/:id/schemas/:schemaName/tables', authenticate, connectionController
  */
 router.get('/:id/relations', authenticate, connectionController.getRelations);
 
+// ============================================
+// TABLE DATA ROUTES
+// ============================================
+
+/**
+ * @route   GET /api/connections/:id/tables/:schema/:table/columns
+ * @desc    Get table columns with metadata (for forms)
+ * @access  Private
+ * @returns Column definitions and primary key info
+ */
+router.get('/:id/tables/:schema/:table/columns', authenticate, connectionController.getTableColumns);
+
+/**
+ * @route   GET /api/connections/:id/tables/:schema/:table/data
+ * @desc    Get table data with pagination and sorting
+ * @access  Private
+ * @query   page, pageSize, sortBy, sortOrder, filters
+ * @returns Paginated rows from the table
+ */
+router.get('/:id/tables/:schema/:table/data', authenticate, connectionController.getTableData);
+
+/**
+ * @route   POST /api/connections/:id/tables/:schema/:table/data
+ * @desc    Insert a new row into a table
+ * @access  Private
+ * @body    { values: { column: value, ... } }
+ */
+router.post('/:id/tables/:schema/:table/data', authenticate, connectionController.insertTableRow);
+
+/**
+ * @route   PUT /api/connections/:id/tables/:schema/:table/data/:rowId
+ * @desc    Update a row in a table
+ * @access  Private
+ * @body    { primaryKeyColumn: string, updates: [{ column, value, columnType }] }
+ */
+router.put('/:id/tables/:schema/:table/data/:rowId', authenticate, connectionController.updateTableRow);
+
+/**
+ * @route   DELETE /api/connections/:id/tables/:schema/:table/data/:rowId
+ * @desc    Delete a row from a table
+ * @access  Private
+ * @body    { primaryKeyColumn: string }
+ */
+router.delete('/:id/tables/:schema/:table/data/:rowId', authenticate, connectionController.deleteTableRow);
+
+/**
+ * @route   POST /api/connections/:id/query
+ * @desc    Execute a raw SQL query
+ * @access  Private
+ * @body    { query: string, readOnly?: boolean }
+ * @returns Query results
+ */
+router.post('/:id/query', authenticate, heavyRateLimit, connectionController.executeQuery);
+
 export default router;

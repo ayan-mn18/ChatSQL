@@ -15,19 +15,59 @@ jobs:
     strategy:
       matrix:
         node-version: [22.x]
-        # See supported Node.js release schedule at https://nodejs.org/en/about/releases/
 
     steps:
     - uses: actions/checkout@v4
+    
     - name: Use Node.js ${{ matrix.node-version }}
       uses: actions/setup-node@v4
       with:
         node-version: ${{ matrix.node-version }}
         cache: 'npm'
-    - run: npm i
-    - run: | 
-          touch .env
-          echo "${{ secrets.PROD }}" > .env
-    - run: npm run build --if-present
-    - run: npm i -g pm2
-    - run: pm2 restart chatsql
+    
+    - name: Install dependencies
+      run: npm i
+    
+    - name: Create .env file
+      run: | 
+        touch .env
+        echo "${{ secrets.PROD }}" > .env
+    
+    - name: Build project
+      run: npm run build --if-present
+    
+    - name: Install PM2 globally
+      run: npm i -g pm2
+    
+    - name: Ensure Redis is running in Docker
+      run: |
+        if [ "$(docker ps -q -f name=redis)" ]; then
+          echo "✅ Redis container is already running"
+        elif [ "$(docker ps -aq -f name=redis)" ]; then
+          echo "🔄 Starting existing Redis container..."
+          docker start redis
+        else
+          echo "🚀 Creating and starting new Redis container..."
+          docker run -d --name redis -p 6379:6379 --restart unless-stopped redis:alpine
+        fi
+        # Wait for Redis to be ready
+        sleep 2
+        docker exec redis redis-cli ping || echo "⚠️ Redis not responding yet, but continuing..."
+    
+    - name: Stop and delete existing PM2 process
+      run: |
+        if pm2 describe chatsql > /dev/null 2>&1; then
+          echo "🛑 Stopping existing chatsql process..."
+          pm2 stop chatsql
+          pm2 delete chatsql
+          echo "✅ Existing process stopped and deleted"
+        else
+          echo "ℹ️ No existing chatsql process found"
+        fi
+    
+    - name: Start new PM2 process
+      run: |
+        echo "🚀 Starting new chatsql process..."
+        pm2 start dist/server.js --name chatsql
+        pm2 save
+        echo "✅ chatsql started successfully"

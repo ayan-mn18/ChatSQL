@@ -39,21 +39,6 @@ jobs:
     - name: Install PM2 globally
       run: npm i -g pm2
     
-    - name: Ensure Redis is running in Docker
-      run: |
-        if [ "$(docker ps -q -f name=redis)" ]; then
-          echo "✅ Redis container is already running"
-        elif [ "$(docker ps -aq -f name=redis)" ]; then
-          echo "🔄 Starting existing Redis container..."
-          docker start redis
-        else
-          echo "🚀 Creating and starting new Redis container..."
-          docker run -d --name redis -p 6379:6379 --restart unless-stopped redis:alpine
-        fi
-        # Wait for Redis to be ready
-        sleep 2
-        docker exec redis redis-cli ping || echo "⚠️ Redis not responding yet, but continuing..."
-    
     - name: Stop and delete existing PM2 process
       run: |
         if pm2 describe chatsql > /dev/null 2>&1; then

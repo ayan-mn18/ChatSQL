@@ -1,4 +1,5 @@
 import { Queue, Worker, Job } from 'bullmq';
+import { Sequelize, QueryTypes } from 'sequelize';
 import { 
   QUEUE_NAMES, 
   AI_OPERATION_JOBS,
@@ -11,7 +12,10 @@ import {
   AIOperationJobType,
 } from '../config/queue';
 import { bullMQConnection, getRedisClient } from '../config/redis';
+import { sequelize } from '../config/db';
+import { decrypt } from '../utils/encryption';
 import { logger } from '../utils/logger';
+import { generateSqlFromPrompt, explainSqlQuery } from '../service/ai.service';
 
 // ============================================
 // AI OPERATIONS QUEUE
@@ -185,6 +189,13 @@ export interface AIJobResult {
     explanation?: string;
     suggestions?: string[];
     confidence?: number;
+    reasoning?: {
+      steps: string[];
+      optimization_notes: string[];
+    };
+    tables_used?: string[];
+    columns_used?: string[];
+    desc?: string;
   };
   error?: string;
   executionTime?: number;
@@ -232,19 +243,31 @@ export function createAIOperationsWorker(): Worker<AIOperationJobData> {
       try {
         switch (type) {
           case AI_OPERATION_JOBS.GENERATE_SQL: {
-            // TODO: Implement in Phase 4
             const data = job.data as GenerateSqlJobData;
             logger.info(`[AI_OPS_WORKER] Generate SQL for prompt: "${data.prompt.substring(0, 50)}..."`);
             
-            // Placeholder result
+            job.updateProgress(10);
+            
+            // Generate SQL using AI service
+            const aiResult = await generateSqlFromPrompt(
+              connectionId,
+              data.prompt,
+              data.selectedSchemas
+            );
+            
+            job.updateProgress(90);
+            
             const result: AIJobResult = {
               jobId: job.id!,
               type: AI_OPERATION_JOBS.GENERATE_SQL,
               success: true,
               result: {
-                sql: '-- SQL generation not implemented yet\nSELECT 1;',
-                explanation: 'This is a placeholder. AI integration coming soon.',
-                confidence: 0,
+                sql: aiResult.query,
+                explanation: aiResult.desc,
+                reasoning: aiResult.reasoning,
+                tables_used: aiResult.tables_used,
+                columns_used: aiResult.columns_used,
+                confidence: 0.9,
               },
               executionTime: Date.now() - startTime,
             };
@@ -255,14 +278,21 @@ export function createAIOperationsWorker(): Worker<AIOperationJobData> {
 
           case AI_OPERATION_JOBS.EXPLAIN_QUERY: {
             const data = job.data as ExplainQueryJobData;
-            logger.info(`[AI_OPS_WORKER] Explain query - Not implemented yet`);
+            logger.info(`[AI_OPS_WORKER] Explain query for connection: ${connectionId}`);
+            
+            job.updateProgress(10);
+            
+            // Explain SQL using AI service
+            const explanation = await explainSqlQuery(connectionId, data.sql);
+            
+            job.updateProgress(90);
             
             const result: AIJobResult = {
               jobId: job.id!,
               type: AI_OPERATION_JOBS.EXPLAIN_QUERY,
               success: true,
               result: {
-                explanation: 'Query explanation not implemented yet.',
+                explanation,
               },
               executionTime: Date.now() - startTime,
             };

@@ -627,6 +627,19 @@ async function processDeleteRow(job: Job<DeleteRowJobData>): Promise<MutationRes
 }
 
 /**
+ * Strip SQL comments from query for validation purposes
+ * Removes both single-line (--) and multi-line block comments
+ */
+function stripSqlComments(sql: string): string {
+  // Remove multi-line comments /* ... */
+  let result = sql.replace(/\/\*[\s\S]*?\*\//g, '');
+  // Remove single-line comments -- ...
+  result = result.replace(/--.*$/gm, '');
+  // Trim whitespace and collapse multiple spaces
+  return result.trim();
+}
+
+/**
  * Process raw SQL query job (for AI-generated queries)
  */
 async function processExecuteRawSQL(job: Job<ExecuteRawSQLJobData>): Promise<any> {
@@ -637,15 +650,19 @@ async function processExecuteRawSQL(job: Job<ExecuteRawSQLJobData>): Promise<any
   
   // Security check for read-only mode
   if (readOnly) {
-    const upperQuery = query.trim().toUpperCase();
-    if (!upperQuery.startsWith('SELECT') && !upperQuery.startsWith('WITH')) {
+    // Strip comments before validation to allow queries with comments
+    const strippedQuery = stripSqlComments(query).toUpperCase();
+    
+    if (!strippedQuery.startsWith('SELECT') && !strippedQuery.startsWith('WITH')) {
       throw new Error('Only SELECT queries allowed in read-only mode');
     }
     
-    // Check for dangerous keywords
+    // Check for dangerous keywords in the stripped query
     const dangerousKeywords = ['DROP', 'DELETE', 'TRUNCATE', 'UPDATE', 'INSERT', 'ALTER', 'CREATE', 'GRANT', 'REVOKE'];
     for (const keyword of dangerousKeywords) {
-      if (upperQuery.includes(keyword)) {
+      // Use word boundary check to avoid false positives (e.g., 'updated_at' column)
+      const keywordRegex = new RegExp(`\\b${keyword}\\b`);
+      if (keywordRegex.test(strippedQuery)) {
         throw new Error(`Keyword "${keyword}" not allowed in read-only mode`);
       }
     }

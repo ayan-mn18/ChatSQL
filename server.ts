@@ -12,7 +12,7 @@ import { Sequelize } from 'sequelize';
 import { connectDatabase } from './src/config/db';
 
 // Import routes
-import { authRoutes, connectionRoutes, jobsRoutes, adminRoutes } from './src/routes';
+import { authRoutes, connectionRoutes, jobsRoutes, adminRoutes, aiRoutes } from './src/routes';
 
 // Import middleware
 import { errorHandler, notFoundHandler, globalRateLimit } from './src/middleware';
@@ -242,6 +242,9 @@ app.use('/api/auth', authRoutes);
 
 // Connection routes
 app.use('/api/connections', connectionRoutes);
+
+// AI routes (SQL generation, query explanation)
+app.use('/api/ai', aiRoutes);
 
 // Jobs routes (SSE progress, job status)
 app.use('/api/jobs', jobsRoutes);

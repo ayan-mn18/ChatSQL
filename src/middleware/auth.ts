@@ -25,9 +25,10 @@ export const authenticate = async (
   next: NextFunction
 ): Promise<void> => {
   try {
-    // Check cookie first, then Authorization header
+    // Check cookie first, then Authorization header, then query param (for SSE)
     const token = req.cookies?.['chatsql-access-token'] || 
-                  req.headers.authorization?.replace('Bearer ', '');
+                  req.headers.authorization?.replace('Bearer ', '') ||
+                  (req.query.token as string);
 
     if (!token) {
       res.status(401).json({

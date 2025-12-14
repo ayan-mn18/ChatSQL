@@ -1,6 +1,7 @@
 import { Request, Response } from 'express';
 import { QueryTypes } from 'sequelize';
 import { sequelize } from '../config/db';
+import { getRedisClient } from '../config/redis';
 import { logger } from '../utils/logger';
 import {
   addGenerateSqlJob,
@@ -241,4 +242,114 @@ export const getJobStatus = async (req: Request, res: Response): Promise<void> =
       code: 'AI_ERROR',
     });
   }
+};
+
+/**
+ * @route   GET /api/ai/stream/:jobId
+ * @desc    SSE stream for AI job result (real-time updates via Redis Pub/Sub)
+ * @access  Private
+ */
+export const streamJobResult = async (req: Request, res: Response): Promise<void> => {
+  const { jobId } = req.params;
+  const userId = req.userId!;
+
+  logger.info(`[AI] SSE stream started for job ${jobId} by user ${userId}`);
+
+  // Set SSE headers
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no'); // Disable nginx buffering
+  res.flushHeaders();
+
+  // Send initial connection message
+  res.write(`data: ${JSON.stringify({ type: 'connected', jobId })}\n\n`);
+
+  // Check if result already exists
+  const existingResult = await getAIJobResult(jobId);
+  if (existingResult) {
+    logger.info(`[AI] SSE: Job ${jobId} already completed, sending result`);
+    res.write(`data: ${JSON.stringify({ type: 'completed', result: existingResult })}\n\n`);
+    res.end();
+    return;
+  }
+
+  // Create a subscriber Redis connection for Pub/Sub
+  const Redis = require('ioredis');
+  const subscriber = new Redis(process.env.REDIS_URL || 'redis://localhost:6379');
+  
+  const channel = `ai_job:${userId}`;
+  let isEnded = false;
+  let pollInterval: NodeJS.Timeout | null = null;
+  let timeout: NodeJS.Timeout | null = null;
+
+  const cleanup = () => {
+    if (!isEnded) {
+      isEnded = true;
+      if (pollInterval) clearInterval(pollInterval);
+      if (timeout) clearTimeout(timeout);
+      try {
+        subscriber.unsubscribe(channel);
+        subscriber.quit();
+      } catch (e) {
+        // Ignore cleanup errors
+      }
+    }
+  };
+
+  // Handle client disconnect
+  req.on('close', () => {
+    logger.info(`[AI] SSE: Client disconnected for job ${jobId}`);
+    cleanup();
+  });
+
+  // Timeout after 60 seconds
+  timeout = setTimeout(() => {
+    logger.info(`[AI] SSE: Timeout for job ${jobId}`);
+    if (!isEnded) {
+      res.write(`data: ${JSON.stringify({ type: 'timeout', message: 'Job timed out' })}\n\n`);
+      res.end();
+      cleanup();
+    }
+  }, 60000);
+
+  // Subscribe to channel and listen for messages (ioredis pattern)
+  subscriber.subscribe(channel, (err: Error | null) => {
+    if (err) {
+      logger.error('[AI] SSE: Subscribe error:', err);
+    } else {
+      logger.info(`[AI] SSE: Subscribed to channel ${channel}`);
+    }
+  });
+
+  subscriber.on('message', (ch: string, message: string) => {
+    if (ch === channel && !isEnded) {
+      try {
+        const data = JSON.parse(message);
+        
+        // Check if this message is for our job
+        if (data.jobId === jobId) {
+          logger.info(`[AI] SSE: Received result for job ${jobId}`);
+          res.write(`data: ${JSON.stringify({ type: 'completed', result: data })}\n\n`);
+          res.end();
+          cleanup();
+        }
+      } catch (e) {
+        logger.error('[AI] SSE: Error parsing message:', e);
+      }
+    }
+  });
+
+  // Also poll periodically as backup (in case we missed the pub/sub message)
+  pollInterval = setInterval(async () => {
+    if (isEnded) return;
+
+    const result = await getAIJobResult(jobId);
+    if (result) {
+      logger.info(`[AI] SSE: Poll found result for job ${jobId}`);
+      res.write(`data: ${JSON.stringify({ type: 'completed', result })}\n\n`);
+      res.end();
+      cleanup();
+    }
+  }, 2000); // Poll every 2 seconds as backup
 };

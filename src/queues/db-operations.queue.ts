@@ -16,6 +16,7 @@ import { sequelize } from '../config/db';
 import { decrypt } from '../utils/encryption';
 import { logger } from '../utils/logger';
 import { CACHE_KEYS, deleteCache, invalidateConnectionCache } from '../utils/cache';
+import { saveQuery } from '../service/query-history.service';
 
 // ============================================
 // DB OPERATIONS QUEUE
@@ -643,7 +644,7 @@ function stripSqlComments(sql: string): string {
  * Process raw SQL query job (for AI-generated queries)
  */
 async function processExecuteRawSQL(job: Job<ExecuteRawSQLJobData>): Promise<any> {
-  const { connectionId, query, parameters, readOnly } = job.data;
+  const { connectionId, userId, query, parameters, readOnly } = job.data;
   
   logger.info(`[DB_OPS] Processing RAW SQL for connection: ${connectionId}`);
   job.updateProgress(10);
@@ -685,12 +686,40 @@ async function processExecuteRawSQL(job: Job<ExecuteRawSQLJobData>): Promise<any
     
     job.updateProgress(90);
     
+    const rowCount = Array.isArray(result) ? result.length : 0;
+    
+    // Save the query to history (non-blocking)
+    saveQuery({
+      connectionId,
+      userId,
+      sqlQuery: query,
+      executionTimeMs: executionTime,
+      rowCount,
+      success: true,
+    }).catch((err: Error) => {
+      logger.warn(`[DB_OPS] Failed to save query history: ${err.message}`);
+    });
+    
     return {
       success: true,
       rows: result,
-      rowCount: Array.isArray(result) ? result.length : 0,
+      rowCount,
       executionTime,
     };
+  } catch (error: any) {
+    // Save failed query to history
+    saveQuery({
+      connectionId,
+      userId,
+      sqlQuery: query,
+      executionTimeMs: 0,
+      success: false,
+      errorMessage: error.message,
+    }).catch((err: Error) => {
+      logger.warn(`[DB_OPS] Failed to save query history: ${err.message}`);
+    });
+    
+    throw error;
   } finally {
     await userDB.close();
     job.updateProgress(100);

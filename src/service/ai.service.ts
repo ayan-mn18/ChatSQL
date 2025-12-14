@@ -5,6 +5,12 @@ import { decrypt } from '../utils/encryption';
 import { getRedisClient } from '../config/redis';
 import { logger } from '../utils/logger';
 
+import { 
+  getRecentQueryHistory, 
+  getAIGeneratedQueries, 
+  formatQueryHistoryForAI 
+} from './query-history.service';
+
 // ============================================
 // AI SERVICE
 // Handles AI-powered SQL generation and query explanation
@@ -311,7 +317,15 @@ export async function generateSqlFromPrompt(
   // Extract relevant parts for the query
   const relevantMetadata = await extractRelevantMetadata(prompt, metadataStr);
   
-  logger.debug(`[AI_SERVICE] Relevant metadata extracted`);
+  // Get query history for context
+  const [recentQueries, aiQueries] = await Promise.all([
+    getRecentQueryHistory(connectionId, 15),
+    getAIGeneratedQueries(connectionId, 10),
+  ]);
+  
+  const queryHistoryContext = formatQueryHistoryForAI(recentQueries, aiQueries);
+  
+  logger.debug(`[AI_SERVICE] Relevant metadata extracted, query history: ${recentQueries.length} recent, ${aiQueries.length} AI-generated`);
   
   // Generate SQL
   const sqlPrompt = `
@@ -320,6 +334,7 @@ Generate an optimized PostgreSQL query based on the user's request.
 
 ### Database Schema:
 ${relevantMetadata}
+${queryHistoryContext}
 
 ### User Request:
 "${prompt}"
@@ -330,6 +345,7 @@ ${relevantMetadata}
 3. Properly join tables using foreign keys
 4. Return clean, formatted SQL
 5. Include a description of what the query returns
+6. Learn from the query history patterns if available
 
 Return ONLY a JSON object with the query and reasoning.`;
 

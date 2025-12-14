@@ -16,6 +16,7 @@ import { sequelize } from '../config/db';
 import { decrypt } from '../utils/encryption';
 import { logger } from '../utils/logger';
 import { generateSqlFromPrompt, explainSqlQuery } from '../service/ai.service';
+import { saveAIGeneratedQuery } from '../service/query-history.service';
 
 // ============================================
 // AI OPERATIONS QUEUE
@@ -254,6 +255,20 @@ export function createAIOperationsWorker(): Worker<AIOperationJobData> {
               data.prompt,
               data.selectedSchemas
             );
+            
+            job.updateProgress(80);
+            
+            // Save the AI-generated query to history (non-blocking)
+            saveAIGeneratedQuery({
+              connectionId,
+              userId,
+              sqlQuery: aiResult.query,
+              aiPrompt: data.prompt,
+              tablesUsed: aiResult.tables_used,
+              columnsUsed: aiResult.columns_used,
+            }).catch((err: Error) => {
+              logger.warn(`[AI_OPS_WORKER] Failed to save AI query history: ${err.message}`);
+            });
             
             job.updateProgress(90);
             

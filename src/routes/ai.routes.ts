@@ -25,6 +25,13 @@ router.post('/:connectionId/generate', authenticate, heavyRateLimit, aiControlle
 router.get('/result/:jobId', authenticate, aiController.getJobResult);
 
 /**
+ * @route   GET /api/ai/stream/:jobId
+ * @desc    SSE stream for AI job result (real-time updates)
+ * @access  Private
+ */
+router.get('/stream/:jobId', authenticate, aiController.streamJobResult);
+
+/**
  * @route   POST /api/ai/:connectionId/explain
  * @desc    Explain a SQL query in plain English
  * @access  Private

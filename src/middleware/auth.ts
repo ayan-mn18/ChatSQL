@@ -2,6 +2,8 @@ import { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
 import { JWTPayload, UserPublic } from '../types';
 import { logger } from '../utils/logger';
+import { sequelize } from '../config/db';
+import { QueryTypes } from 'sequelize';
 
 // Extend Express Request to include user
 declare global {
@@ -9,6 +11,7 @@ declare global {
     interface Request {
       user?: UserPublic;
       userId?: string;
+      userRole?: 'super_admin' | 'viewer';
     }
   }
 }
@@ -52,7 +55,29 @@ export const authenticate = async (
     const decoded = jwt.verify(token, JWT_SECRET) as JWTPayload;
     
     req.userId = decoded.userId;
-    // User details can be fetched from DB if needed in controller
+    
+    // Fetch user role from database
+    try {
+      const [user] = await sequelize.query<{ role: string; is_active: boolean }>(
+        `SELECT role, is_active FROM users WHERE id = :userId LIMIT 1`,
+        { replacements: { userId: decoded.userId }, type: QueryTypes.SELECT }
+      );
+      
+      if (!user || !user.is_active) {
+        res.status(401).json({
+          success: false,
+          error: 'User account is not active',
+          code: 'ACCOUNT_INACTIVE'
+        });
+        return;
+      }
+      
+      req.userRole = (user.role || 'super_admin') as 'super_admin' | 'viewer';
+    } catch (dbError) {
+      logger.error('Failed to fetch user role:', dbError);
+      // Default to super_admin for backward compatibility
+      req.userRole = 'super_admin';
+    }
     
     next();
   } catch (error) {

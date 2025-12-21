@@ -12,14 +12,14 @@ import { Sequelize } from 'sequelize';
 import { connectDatabase } from './src/config/db';
 
 // Import routes
-import { authRoutes, connectionRoutes, jobsRoutes, adminRoutes, aiRoutes } from './src/routes';
+import { authRoutes, connectionRoutes, jobsRoutes, adminRoutes, aiRoutes, viewerRoutes } from './src/routes';
 
 // Import middleware
 import { errorHandler, notFoundHandler, globalRateLimit } from './src/middleware';
 import { corsConfig, env, checkRedisHealth, closeRedisConnections } from './src/config';
 
 // Import queue workers
-import { createSchemaSyncWorker, createAIOperationsWorker, createDBOperationsWorker } from './src/queues';
+import { createSchemaSyncWorker, createAIOperationsWorker, createDBOperationsWorker, createAccessManagementWorker, initializeAccessManagement } from './src/queues';
 
 import { logger } from './src/utils/logger';
 
@@ -252,6 +252,9 @@ app.use('/api/jobs', jobsRoutes);
 // Admin routes (Bull Board dashboard)
 app.use('/admin/queues', adminRoutes);
 
+// Viewer routes (user management)
+app.use('/api/viewers', viewerRoutes);
+
 // Future routes - uncomment when implemented
 // app.use('/api/query', queryRoutes);
 // app.use('/api/schema', schemaRoutes);
@@ -279,6 +282,7 @@ app.use(errorHandler);
 let schemaSyncWorker: ReturnType<typeof createSchemaSyncWorker> | null = null;
 let aiOperationsWorker: ReturnType<typeof createAIOperationsWorker> | null = null;
 let dbOperationsWorker: ReturnType<typeof createDBOperationsWorker> | null = null;
+let accessManagementWorker: ReturnType<typeof createAccessManagementWorker> | null = null;
 
 // Graceful shutdown handler
 async function gracefulShutdown(signal: string) {
@@ -298,6 +302,11 @@ async function gracefulShutdown(signal: string) {
   if (dbOperationsWorker) {
     logger.info('[SERVER] Closing DB operations worker...');
     await dbOperationsWorker.close();
+  }
+  
+  if (accessManagementWorker) {
+    logger.info('[SERVER] Closing access management worker...');
+    await accessManagementWorker.close();
   }
   
   // Close Redis connections
@@ -330,6 +339,10 @@ app.listen(PORT, async () => {
     schemaSyncWorker = createSchemaSyncWorker();
     aiOperationsWorker = createAIOperationsWorker();
     dbOperationsWorker = createDBOperationsWorker();
+    accessManagementWorker = createAccessManagementWorker();
+    
+    // Initialize access management (periodic cleanup job)
+    await initializeAccessManagement();
     
     logger.info('[SERVER] ✅ Queue workers started');
     logger.info('[SERVER] 📊 Bull Board available at http://localhost:' + PORT + '/admin/queues');

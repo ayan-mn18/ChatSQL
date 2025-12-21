@@ -69,3 +69,17 @@ export {
   type SelectQueryResult,
   type MutationResult,
 } from './db-operations.queue';
+
+// Access Management Queue
+export {
+  accessManagementQueue,
+  accessManagementQueueEvents,
+  addCleanupExpiredViewersJob,
+  scheduleViewerExpiry,
+  cancelViewerExpiryJob,
+  createAccessManagementWorker,
+  initializeAccessManagement,
+  type AccessManagementJobData,
+  type CleanupExpiredViewersJobData,
+  type ScheduleViewerExpiryJobData,
+} from './access-management.queue';

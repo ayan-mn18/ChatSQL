@@ -3,6 +3,7 @@ export { default as connectionRoutes } from './connection.routes';
 export { default as jobsRoutes } from './jobs.routes';
 export { default as adminRoutes } from './admin.routes';
 export { default as aiRoutes } from './ai.routes';
+export { default as viewerRoutes } from './viewer.routes';
 
 // Future routes - uncomment when implemented
 // export { default as queryRoutes } from './query.routes';

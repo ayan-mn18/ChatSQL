@@ -135,6 +135,35 @@ export const sendWelcomeEmail = async (
 };
 
 /**
+ * Send viewer invitation email with credentials
+ */
+export const sendViewerInvitationEmail = async (
+  email: string,
+  tempPassword: string,
+  invitedByName: string,
+  expiresAt?: Date
+): Promise<boolean> => {
+  try {
+    const transport = getTransporter();
+    const template = emailTemplates.viewerInvitation(email, tempPassword, invitedByName, expiresAt);
+    
+    await transport.sendMail({
+      from: `"${SMTP_FROM_NAME}" <${SMTP_FROM_EMAIL}>`,
+      to: email,
+      subject: template.subject,
+      text: template.text,
+      html: template.html,
+    });
+    
+    logger.info(`✅ [EMAIL] Viewer invitation sent to ${email}`);
+    return true;
+  } catch (error) {
+    logger.error(`❌ [EMAIL] Failed to send viewer invitation to ${email}:`, error);
+    return false;
+  }
+};
+
+/**
  * Verify SMTP connection
  */
 export const verifySmtpConnection = async (): Promise<boolean> => {
@@ -210,5 +239,43 @@ export const emailTemplates = {
       </div>
     `,
     text: `Welcome to ChatSQL${username ? `, ${username}` : ''}! Your email has been verified and your account is now active.`
+  }),
+
+  viewerInvitation: (email: string, tempPassword: string, invitedBy: string, expiresAt?: Date) => ({
+    subject: 'You have been invited to ChatSQL! 🗄️',
+    html: `
+      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+        <h2 style="color: #333;">You've been invited to ChatSQL! 🗄️</h2>
+        <p><strong>${invitedBy}</strong> has invited you to access their database on ChatSQL.</p>
+        
+        <div style="background: #f8f9fa; padding: 20px; border-radius: 8px; margin: 20px 0;">
+          <h3 style="margin-top: 0; color: #333;">Your Login Credentials</h3>
+          <p style="margin: 5px 0;"><strong>Email:</strong> ${email}</p>
+          <p style="margin: 5px 0;"><strong>Temporary Password:</strong></p>
+          <div style="background: #fff; padding: 12px; border-radius: 4px; border: 1px solid #dee2e6; font-family: monospace; font-size: 16px; letter-spacing: 1px;">
+            ${tempPassword}
+          </div>
+        </div>
+        
+        ${expiresAt ? `
+        <div style="background: #fff3cd; padding: 15px; border-radius: 8px; margin: 20px 0; border-left: 4px solid #ffc107;">
+          <p style="margin: 0; color: #856404;">
+            <strong>⏰ Temporary Access:</strong> Your access will expire on <strong>${expiresAt.toLocaleDateString()} at ${expiresAt.toLocaleTimeString()}</strong>
+          </p>
+        </div>
+        ` : ''}
+        
+        <p>You'll be asked to change your password on first login.</p>
+        
+        <div style="text-align: center; margin: 30px 0;">
+          <a href="${process.env.FRONTEND_URL || 'http://localhost:5173'}/login" style="background: #6366f1; color: white; padding: 14px 35px; text-decoration: none; border-radius: 8px; font-weight: bold; display: inline-block;">Login to ChatSQL</a>
+        </div>
+        
+        <hr style="border: none; border-top: 1px solid #eee; margin: 30px 0;">
+        <p style="color: #666; font-size: 13px;">If you didn't expect this invitation, please ignore this email or contact the sender.</p>
+        <p style="color: #999; font-size: 12px;">© ${new Date().getFullYear()} ChatSQL. All rights reserved.</p>
+      </div>
+    `,
+    text: `You've been invited to ChatSQL by ${invitedBy}!\n\nYour login credentials:\nEmail: ${email}\nTemporary Password: ${tempPassword}\n\n${expiresAt ? `Note: Your access will expire on ${expiresAt.toLocaleDateString()} at ${expiresAt.toLocaleTimeString()}\n\n` : ''}Login at: ${process.env.FRONTEND_URL || 'http://localhost:5173'}/login\n\nYou'll be asked to change your password on first login.`
   })
 };

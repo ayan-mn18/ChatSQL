@@ -37,6 +37,11 @@ import {
   TableSchema,
   ApiResponse
 } from '../types';
+import {
+  viewerHasConnectionAccess,
+  getViewerAllowedSchemas,
+  getViewerAllowedTables
+} from '../services/viewer.service';
 
 // ============================================
 // CONNECTION CONTROLLER
@@ -413,13 +418,15 @@ export const createConnection = async (req: Request, res: Response): Promise<voi
  * 
  * STEPS:
  * 1. Get user_id from JWT (req.userId)
- * 2. Query connections table WHERE user_id = $1
- * 3. Return list of connections (WITHOUT passwords)
- * 4. Include schema_synced status and last_tested_at
+ * 2. Check user role (super_admin sees own connections, viewer sees permitted connections)
+ * 3. Query connections table accordingly
+ * 4. Return list of connections (WITHOUT passwords)
+ * 5. Include schema_synced status and last_tested_at
  */
 export const getAllConnections = async (req: Request, res: Response): Promise<void> => {
   try {
     const userId = req.userId;
+    const userRole = req.userRole || 'super_admin';
     
     if (!userId) {
       res.status(401).json({
@@ -430,22 +437,42 @@ export const getAllConnections = async (req: Request, res: Response): Promise<vo
       return;
     }
 
-    logger.info('[CONNECTION] Get all connections request', { userId });
+    logger.info('[CONNECTION] Get all connections request', { userId, userRole });
 
-    const connections = await sequelize.query<ConnectionPublic>(
-      `SELECT id, user_id, name, host, port, type, db_name, username, ssl,
-              is_valid, schema_synced, schema_synced_at, last_tested_at, 
-              created_at, updated_at
-       FROM connections
-       WHERE user_id = $1
-       ORDER BY created_at DESC`,
-      {
-        bind: [userId],
-        type: QueryTypes.SELECT
-      }
-    );
+    let connections: ConnectionPublic[];
+    
+    if (userRole === 'viewer') {
+      // Viewers only see connections they have permissions for
+      connections = await sequelize.query<ConnectionPublic>(
+        `SELECT DISTINCT c.id, c.user_id, c.name, c.host, c.port, c.type, c.db_name, c.username, c.ssl,
+                c.is_valid, c.schema_synced, c.schema_synced_at, c.last_tested_at, 
+                c.created_at, c.updated_at
+         FROM connections c
+         INNER JOIN viewer_permissions vp ON c.id = vp.connection_id
+         WHERE vp.viewer_user_id = $1
+         ORDER BY c.created_at DESC`,
+        {
+          bind: [userId],
+          type: QueryTypes.SELECT
+        }
+      );
+    } else {
+      // Super admins see their own connections
+      connections = await sequelize.query<ConnectionPublic>(
+        `SELECT id, user_id, name, host, port, type, db_name, username, ssl,
+                is_valid, schema_synced, schema_synced_at, last_tested_at, 
+                created_at, updated_at
+         FROM connections
+         WHERE user_id = $1
+         ORDER BY created_at DESC`,
+        {
+          bind: [userId],
+          type: QueryTypes.SELECT
+        }
+      );
+    }
 
-    logger.info(`[CONNECTION] Found ${connections.length} connections for user`, { userId });
+    logger.info(`[CONNECTION] Found ${connections.length} connections for user`, { userId, userRole });
 
     res.status(200).json({
       success: true,
@@ -1013,18 +1040,28 @@ export const getSchemas = async (req: Request, res: Response): Promise<void> => 
   try {
     const { id } = req.params;
     const userId = req.userId;
+    const userRole = req.userRole;
     logger.info(`[CONNECTION] Get schemas request for connection: ${id}`);
     
-    // 1. Verify connection exists and belongs to user
-    const [connectionResult] = await sequelize.query<{ id: string }>(
-      `SELECT id FROM connections WHERE id = :id AND user_id = :userId`,
-      {
-        replacements: { id, userId },
-        type: QueryTypes.SELECT
-      }
-    );
+    // 1. Verify connection exists
+    // For super_admin: check ownership
+    // For viewer: check viewer_permissions
+    let hasAccess = false;
     
-    if (!connectionResult) {
+    if (userRole === 'viewer') {
+      hasAccess = await viewerHasConnectionAccess(userId!, id);
+    } else {
+      const [connectionResult] = await sequelize.query<{ id: string }>(
+        `SELECT id FROM connections WHERE id = :id AND user_id = :userId`,
+        {
+          replacements: { id, userId },
+          type: QueryTypes.SELECT
+        }
+      );
+      hasAccess = !!connectionResult;
+    }
+    
+    if (!hasAccess) {
       logger.warn(`[CONNECTION] Connection not found or unauthorized: ${id}`);
       res.status(404).json({
         success: false,
@@ -1034,8 +1071,10 @@ export const getSchemas = async (req: Request, res: Response): Promise<void> => 
       return;
     }
     
-    // 2. Check Redis cache first
-    const cacheKey = CACHE_KEYS.schemas(id);
+    // 2. Check Redis cache first (different cache key for viewers to avoid showing cached full data)
+    const cacheKey = userRole === 'viewer' 
+      ? `viewer:${userId}:${CACHE_KEYS.schemas(id)}`
+      : CACHE_KEYS.schemas(id);
     const cached = await getFromCache<DatabaseSchemaPublic[]>(cacheKey);
     
     if (cached) {
@@ -1051,7 +1090,7 @@ export const getSchemas = async (req: Request, res: Response): Promise<void> => 
     }
     
     // 3. Cache miss - query database
-    const schemas = await sequelize.query<DatabaseSchemaPublic>(
+    let schemas = await sequelize.query<DatabaseSchemaPublic>(
       `SELECT 
         id,
         schema_name,
@@ -1070,7 +1109,16 @@ export const getSchemas = async (req: Request, res: Response): Promise<void> => 
       }
     );
     
-    // 4. Cache result
+    // 4. For viewers, filter schemas based on permissions
+    if (userRole === 'viewer') {
+      const { schemas: allowedSchemas, hasFullAccess } = await getViewerAllowedSchemas(userId!, id);
+      
+      if (!hasFullAccess && allowedSchemas) {
+        schemas = schemas.filter(s => allowedSchemas.includes(s.schema_name));
+      }
+    }
+    
+    // 5. Cache result
     await setCache(cacheKey, schemas, CACHE_TTL.SCHEMAS);
     
     logger.info(`[CONNECTION] Fetched ${schemas.length} schemas for connection: ${id}`);
@@ -1219,18 +1267,36 @@ export const getTablesBySchema = async (req: Request, res: Response): Promise<vo
   try {
     const { id, schemaName } = req.params;
     const userId = req.userId;
+    const userRole = req.userRole;
     logger.info(`[CONNECTION] Get tables request for connection: ${id}, schema: ${schemaName}`);
     
-    // 1. Verify connection exists and belongs to user
-    const [connectionResult] = await sequelize.query<{ id: string }>(
-      `SELECT id FROM connections WHERE id = :id AND user_id = :userId`,
-      {
-        replacements: { id, userId },
-        type: QueryTypes.SELECT
-      }
-    );
+    // 1. Verify connection exists
+    // For super_admin: check ownership
+    // For viewer: check viewer_permissions
+    let hasAccess = false;
     
-    if (!connectionResult) {
+    if (userRole === 'viewer') {
+      hasAccess = await viewerHasConnectionAccess(userId!, id);
+      
+      // Also verify viewer has access to this schema
+      if (hasAccess) {
+        const { schemas: allowedSchemas, hasFullAccess } = await getViewerAllowedSchemas(userId!, id);
+        if (!hasFullAccess && allowedSchemas && !allowedSchemas.includes(schemaName)) {
+          hasAccess = false;
+        }
+      }
+    } else {
+      const [connectionResult] = await sequelize.query<{ id: string }>(
+        `SELECT id FROM connections WHERE id = :id AND user_id = :userId`,
+        {
+          replacements: { id, userId },
+          type: QueryTypes.SELECT
+        }
+      );
+      hasAccess = !!connectionResult;
+    }
+    
+    if (!hasAccess) {
       logger.warn(`[CONNECTION] Connection not found or unauthorized: ${id}`);
       res.status(404).json({
         success: false,
@@ -1240,8 +1306,10 @@ export const getTablesBySchema = async (req: Request, res: Response): Promise<vo
       return;
     }
     
-    // 2. Check Redis cache first
-    const cacheKey = CACHE_KEYS.tables(id, schemaName);
+    // 2. Check Redis cache first (different cache key for viewers)
+    const cacheKey = userRole === 'viewer'
+      ? `viewer:${userId}:${CACHE_KEYS.tables(id, schemaName)}`
+      : CACHE_KEYS.tables(id, schemaName);
     const cached = await getFromCache<TableSchema[]>(cacheKey);
     
     if (cached) {
@@ -1258,7 +1326,7 @@ export const getTablesBySchema = async (req: Request, res: Response): Promise<vo
     }
     
     // 3. Cache miss - query database
-    const tables = await sequelize.query<TableSchema>(
+    let tables = await sequelize.query<TableSchema>(
       `SELECT 
         id,
         connection_id,
@@ -1284,7 +1352,16 @@ export const getTablesBySchema = async (req: Request, res: Response): Promise<vo
       }
     );
     
-    // 4. Cache result
+    // 4. For viewers, filter tables based on permissions
+    if (userRole === 'viewer') {
+      const { tables: allowedTables, hasFullAccess } = await getViewerAllowedTables(userId!, id, schemaName);
+      
+      if (!hasFullAccess && allowedTables) {
+        tables = tables.filter(t => allowedTables.includes(t.table_name));
+      }
+    }
+    
+    // 5. Cache result
     await setCache(cacheKey, tables, CACHE_TTL.TABLES);
     
     logger.info(`[CONNECTION] Fetched ${tables.length} tables for connection: ${id}, schema: ${schemaName}`);

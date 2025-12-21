@@ -86,13 +86,21 @@ export interface GetAnalyticsJobData {
   userId: string;
 }
 
+export interface EnableExtensionJobData {
+  type: typeof DB_OPERATION_JOBS.ENABLE_EXTENSION;
+  connectionId: string;
+  userId: string;
+  extensionName: string;
+}
+
 export type DBOperationJobData = 
   | SelectQueryJobData 
   | UpdateRowJobData 
   | InsertRowJobData
   | DeleteRowJobData
   | ExecuteRawSQLJobData
-  | GetAnalyticsJobData;
+  | GetAnalyticsJobData
+  | EnableExtensionJobData;
 
 // Supporting types
 export interface FilterCondition {
@@ -267,6 +275,28 @@ export async function addGetAnalyticsJob(data: Omit<GetAnalyticsJobData, 'type'>
   );
   
   logger.info(`[DB_OPS] Added ANALYTICS job ${job.id}`);
+  return job;
+}
+
+/**
+ * Add an ENABLE_EXTENSION job to the queue
+ */
+export async function addEnableExtensionJob(data: Omit<EnableExtensionJobData, 'type'>): Promise<Job<DBOperationJobData>> {
+  const jobData: EnableExtensionJobData = {
+    ...data,
+    type: DB_OPERATION_JOBS.ENABLE_EXTENSION,
+  };
+  
+  const job = await dbOperationsQueue.add(
+    DB_OPERATION_JOBS.ENABLE_EXTENSION,
+    jobData,
+    {
+      priority: JOB_PRIORITY.HIGH,
+      jobId: `enable-ext-${data.connectionId}-${data.extensionName}-${Date.now()}`,
+    }
+  );
+  
+  logger.info(`[DB_OPS] Added ENABLE_EXTENSION job ${job.id} for ${data.extensionName}`);
   return job;
 }
 
@@ -823,17 +853,101 @@ async function processGetAnalytics(job: Job<GetAnalyticsJobData>): Promise<any> 
       LIMIT 50`,
       { type: QueryTypes.SELECT }
     );
+    job.updateProgress(90);
+
+    // 5. pg_stat_statements (if available)
+    let pgStatStatements: any[] = [];
+    try {
+      // Check if extension exists
+      const [extensionExists] = await userDB.query<any>(
+        "SELECT EXISTS (SELECT FROM pg_extension WHERE extname = 'pg_stat_statements') as exists",
+        { type: QueryTypes.SELECT }
+      );
+
+      if (extensionExists?.exists) {
+        // Try to fetch top queries by total time
+        // Note: column names changed in PG 13 (total_time -> total_exec_time)
+        pgStatStatements = await userDB.query<any>(
+          `SELECT 
+            query, 
+            calls, 
+            rows,
+            CASE 
+              WHEN current_setting('server_version_num')::int >= 130000 THEN total_exec_time 
+              ELSE total_time 
+            END as total_time_ms,
+            CASE 
+              WHEN current_setting('server_version_num')::int >= 130000 THEN mean_exec_time 
+              ELSE (total_time / NULLIF(calls, 0)) 
+            END as avg_time_ms
+          FROM pg_stat_statements
+          WHERE query NOT LIKE 'SELECT EXISTS%' AND query NOT LIKE 'SELECT pg_database_size%'
+          ORDER BY total_time_ms DESC
+          LIMIT 10`,
+          { type: QueryTypes.SELECT }
+        );
+      }
+    } catch (e) {
+      logger.warn(`[DB_OPS] Failed to fetch pg_stat_statements for connection ${connectionId}:`, e);
+    }
     
     return {
       dbSize: parseInt(dbSizeResult?.size_bytes || '0'),
       activeConnections: parseInt(connectionsResult?.active_connections || '0'),
       cacheHitRatio: parseFloat(cacheHitResult?.cache_hit_ratio || '100'),
       tableStats,
+      pgStatStatements,
       timestamp: new Date().toISOString()
     };
     
   } catch (error: any) {
     logger.error(`[DB_OPS] Get analytics failed for connection ${connectionId}:`, error);
+    throw error;
+  } finally {
+    await userDB.close();
+    job.updateProgress(100);
+  }
+}
+
+/**
+ * Process ENABLE_EXTENSION job
+ */
+async function processEnableExtension(job: Job<EnableExtensionJobData>): Promise<any> {
+  const { connectionId, extensionName } = job.data;
+  
+  logger.info(`[DB_OPS] Processing ENABLE_EXTENSION ${extensionName} for connection ${connectionId}`);
+  job.updateProgress(20);
+  
+  const userDB = await createUserDBConnection(connectionId);
+  if (!userDB) {
+    throw new Error('Failed to connect to database');
+  }
+  
+  try {
+    job.updateProgress(50);
+    
+    // Run the CREATE EXTENSION command
+    // We use a template literal but extensionName is validated by the job creator
+    await userDB.query(`CREATE EXTENSION IF NOT EXISTS "${extensionName}"`, {
+      type: QueryTypes.RAW
+    });
+    
+    job.updateProgress(90);
+    
+    return {
+      success: true,
+      message: `Extension ${extensionName} enabled successfully`,
+      extension: extensionName
+    };
+    
+  } catch (error: any) {
+    logger.error(`[DB_OPS] Enable extension ${extensionName} failed for connection ${connectionId}:`, error);
+    
+    // Check for common errors (like permission denied)
+    if (error.parent?.code === '42501') {
+      throw new Error(`Permission denied: Your database user does not have superuser or CREATE EXTENSION privileges.`);
+    }
+    
     throw error;
   } finally {
     await userDB.close();
@@ -873,6 +987,9 @@ export function createDBOperationsWorker(): Worker<DBOperationJobData> {
           
           case DB_OPERATION_JOBS.GET_ANALYTICS:
             return await processGetAnalytics(job as Job<GetAnalyticsJobData>);
+
+          case DB_OPERATION_JOBS.ENABLE_EXTENSION:
+            return await processEnableExtension(job as Job<EnableExtensionJobData>);
           
           default:
             throw new Error(`Unknown job type: ${(job.data as any).type}`);

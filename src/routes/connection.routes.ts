@@ -99,6 +99,13 @@ router.get('/:id/schemas/:schemaName/tables', authenticate, connectionController
 router.get('/:id/relations', authenticate, connectionController.getRelations);
 
 /**
+ * @route   POST /api/connections/:id/extensions
+ * @desc    Enable a PostgreSQL extension
+ * @access  Private
+ */
+router.post('/:id/extensions', authenticate, heavyRateLimit, validate(uuidParamSchema), connectionController.enableConnectionExtension);
+
+/**
  * @route   GET /api/connections/:id/analytics
  * @desc    Get real-time database analytics and statistics
  * @access  Private

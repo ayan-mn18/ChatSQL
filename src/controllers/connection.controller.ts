@@ -11,6 +11,7 @@ import {
   addDeleteRowJob,
   addExecuteRawSQLJob,
   addGetAnalyticsJob,
+  addEnableExtensionJob,
   waitForJobResult,
   SelectQueryResult,
   MutationResult,
@@ -1860,14 +1861,19 @@ export const getConnectionAnalytics = async (req: Request, res: Response): Promi
       return;
     }
     
-    // 3. Get stats from our own database (Query History)
+    // 3. Get ChatSQL query stats (from our queries table)
     const [queryStats] = await sequelize.query<any>(
       `SELECT 
         count(*) as total_queries,
         count(*) FILTER (WHERE is_ai_generated = true) as ai_queries,
+        count(*) FILTER (WHERE is_ai_generated = false) as manual_queries,
         count(*) FILTER (WHERE is_ai_generated = true AND status = 'success') as ai_success_count,
+        count(*) FILTER (WHERE is_ai_generated = false AND status = 'success') as manual_success_count,
         avg(execution_time_ms) as avg_execution_time,
-        count(*) FILTER (WHERE status = 'error') as error_count
+        avg(execution_time_ms) FILTER (WHERE is_ai_generated = true) as avg_ai_execution_time,
+        avg(execution_time_ms) FILTER (WHERE is_ai_generated = false) as avg_manual_execution_time,
+        count(*) FILTER (WHERE status = 'error') as error_count,
+        count(*) FILTER (WHERE is_saved = true) as saved_queries_count
       FROM queries 
       WHERE connection_id = :id`,
       {
@@ -1876,7 +1882,118 @@ export const getConnectionAnalytics = async (req: Request, res: Response): Promi
       }
     );
     
-    // 4. Add job to queue to get real-time stats from user's DB
+    // 4. Get recent queries (last 10)
+    const recentQueries = await sequelize.query<any>(
+      `SELECT 
+        id, query_text, execution_time_ms, row_count, status, 
+        is_ai_generated, ai_prompt, is_saved, saved_name, error_message,
+        created_at
+      FROM queries 
+      WHERE connection_id = :id
+      ORDER BY created_at DESC
+      LIMIT 10`,
+      {
+        replacements: { id },
+        type: QueryTypes.SELECT
+      }
+    );
+    
+    // 5. Get slowest queries (top 5)
+    const slowestQueries = await sequelize.query<any>(
+      `SELECT 
+        id, query_text, execution_time_ms, row_count, status,
+        is_ai_generated, ai_prompt, created_at
+      FROM queries 
+      WHERE connection_id = :id AND status = 'success' AND execution_time_ms IS NOT NULL
+      ORDER BY execution_time_ms DESC
+      LIMIT 5`,
+      {
+        replacements: { id },
+        type: QueryTypes.SELECT
+      }
+    );
+    
+    // 6. Get top AI prompts (most common intents)
+    const topAiPrompts = await sequelize.query<any>(
+      `SELECT 
+        ai_prompt, 
+        count(*) as usage_count,
+        avg(execution_time_ms) as avg_time,
+        count(*) FILTER (WHERE status = 'success') as success_count
+      FROM queries 
+      WHERE connection_id = :id AND is_ai_generated = true AND ai_prompt IS NOT NULL
+      GROUP BY ai_prompt
+      ORDER BY usage_count DESC
+      LIMIT 5`,
+      {
+        replacements: { id },
+        type: QueryTypes.SELECT
+      }
+    );
+
+    // 6b. Get top SQL queries (most common SQL)
+    const topSqlQueries = await sequelize.query<any>(
+      `SELECT 
+        query_text, 
+        count(*) as usage_count,
+        avg(execution_time_ms) as avg_time,
+        max(execution_time_ms) as max_time,
+        count(*) FILTER (WHERE status = 'success') as success_count
+      FROM queries 
+      WHERE connection_id = :id
+      GROUP BY query_text
+      ORDER BY usage_count DESC
+      LIMIT 5`,
+      {
+        replacements: { id },
+        type: QueryTypes.SELECT
+      }
+    );
+    
+    // 7. Get query trends (last 7 days)
+    const queryTrends = await sequelize.query<any>(
+      `SELECT 
+        DATE(created_at) as date,
+        count(*) as total,
+        count(*) FILTER (WHERE is_ai_generated = true) as ai_count,
+        count(*) FILTER (WHERE is_ai_generated = false) as manual_count
+      FROM queries 
+      WHERE connection_id = :id AND created_at >= NOW() - INTERVAL '7 days'
+      GROUP BY DATE(created_at)
+      ORDER BY date ASC`,
+      {
+        replacements: { id },
+        type: QueryTypes.SELECT
+      }
+    );
+    
+    // 8. Get most queried tables via ChatSQL (parse from query_text if tables_used doesn't exist)
+    // Try to extract table names from SELECT/FROM/JOIN patterns in query_text
+    let mostQueriedTables: any[] = [];
+    try {
+      mostQueriedTables = await sequelize.query<any>(
+        `SELECT 
+          table_name,
+          count(*) as query_count,
+          count(*) FILTER (WHERE is_ai_generated = true) as ai_query_count
+        FROM queries, 
+             jsonb_array_elements_text(COALESCE(tables_used, '[]'::jsonb)) as table_name
+        WHERE connection_id = :id AND tables_used IS NOT NULL AND jsonb_array_length(tables_used) > 0
+        GROUP BY table_name
+        ORDER BY query_count DESC
+        LIMIT 6`,
+        {
+          replacements: { id },
+          type: QueryTypes.SELECT
+        }
+      );
+    } catch (e) {
+      // Column might not exist or be empty, that's okay
+      logger.warn('[CONNECTION] tables_used query failed, using fallback:', e);
+      mostQueriedTables = [];
+    }
+    
+    // 9. Add job to queue to get real-time stats from user's DB
     const job = await addGetAnalyticsJob({
       connectionId: id,
       userId: userId!,
@@ -1885,21 +2002,44 @@ export const getConnectionAnalytics = async (req: Request, res: Response): Promi
     // Wait for job result
     const dbStats = await waitForJobResult<any>(job, 30000);
     
-    // 5. Combine and format results
+    // 10. Combine and format results
     const analyticsData = {
-      ...dbStats,
-      queryStats: {
-        totalQueries: parseInt(queryStats?.total_queries || '0'),
-        aiQueries: parseInt(queryStats?.ai_queries || '0'),
-        aiSuccessRate: queryStats?.ai_queries > 0 
-          ? Math.round((queryStats.ai_success_count / queryStats.ai_queries) * 100) 
-          : 100,
-        avgExecutionTime: Math.round(parseFloat(queryStats?.avg_execution_time || '0')),
-        errorCount: parseInt(queryStats?.error_count || '0')
+      // Database health stats (from PostgreSQL)
+      databaseHealth: {
+        dbSize: dbStats.dbSize,
+        activeConnections: dbStats.activeConnections,
+        cacheHitRatio: dbStats.cacheHitRatio,
+        tableStats: dbStats.tableStats,
+        timestamp: dbStats.timestamp
+      },
+      // ChatSQL activity stats (from our queries table)
+      chatSqlActivity: {
+        summary: {
+          totalQueries: parseInt(queryStats?.total_queries || '0'),
+          aiQueries: parseInt(queryStats?.ai_queries || '0'),
+          manualQueries: parseInt(queryStats?.manual_queries || '0'),
+          savedQueries: parseInt(queryStats?.saved_queries_count || '0'),
+          errorCount: parseInt(queryStats?.error_count || '0'),
+          aiSuccessRate: queryStats?.ai_queries > 0 
+            ? Math.round((queryStats.ai_success_count / queryStats.ai_queries) * 100) 
+            : 100,
+          manualSuccessRate: queryStats?.manual_queries > 0 
+            ? Math.round((queryStats.manual_success_count / queryStats.manual_queries) * 100) 
+            : 100,
+          avgExecutionTime: Math.round(parseFloat(queryStats?.avg_execution_time || '0')),
+          avgAiExecutionTime: Math.round(parseFloat(queryStats?.avg_ai_execution_time || '0')),
+          avgManualExecutionTime: Math.round(parseFloat(queryStats?.avg_manual_execution_time || '0')),
+        },
+        recentQueries,
+        slowestQueries,
+        topAiPrompts,
+        topSqlQueries,
+        queryTrends,
+        mostQueriedTables
       }
     };
     
-    // 6. Cache result (1 minute TTL)
+    // 11. Cache result (1 minute TTL)
     await setCache(cacheKey, analyticsData, 60);
     
     res.json({
@@ -1913,6 +2053,73 @@ export const getConnectionAnalytics = async (req: Request, res: Response): Promi
       success: false,
       error: error.message || 'Failed to get analytics',
       code: 'ANALYTICS_FETCH_ERROR'
+    });
+  }
+};
+
+/**
+ * Enable a PostgreSQL extension on the user's database
+ * POST /api/connections/:id/extensions
+ */
+export const enableConnectionExtension = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const { id } = req.params;
+    const { extensionName } = req.body;
+    const userId = req.userId;
+
+    if (!extensionName) {
+      res.status(400).json({
+        success: false,
+        error: 'Extension name is required',
+        code: 'MISSING_EXTENSION_NAME'
+      });
+      return;
+    }
+
+    // 1. Verify connection exists and belongs to user
+    const [connectionResult] = await sequelize.query<{ id: string }>(
+      `SELECT id FROM connections WHERE id = :id AND user_id = :userId`,
+      {
+        replacements: { id, userId },
+        type: QueryTypes.SELECT
+      }
+    );
+    
+    if (!connectionResult) {
+      res.status(404).json({
+        success: false,
+        error: 'Connection not found',
+        code: 'CONNECTION_NOT_FOUND'
+      });
+      return;
+    }
+
+    // 2. Add job to queue
+    const job = await addEnableExtensionJob({
+      connectionId: id,
+      userId: userId!,
+      extensionName
+    });
+
+    // 3. Wait for result
+    const result = await waitForJobResult<any>(job, 30000);
+
+    // 4. Invalidate analytics cache so it refreshes with new data
+    const cacheKey = `connection:${id}:analytics`;
+    await deleteCache(cacheKey);
+
+    res.json({
+      success: true,
+      message: result.message || `Extension ${extensionName} enabled successfully`,
+      data: result
+    });
+
+  } catch (error: any) {
+    logger.error('[CONNECTION] Enable extension failed:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to enable extension',
+      code: 'EXTENSION_ENABLE_ERROR'
     });
   }
 };

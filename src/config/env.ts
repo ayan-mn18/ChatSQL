@@ -28,6 +28,7 @@ const envSchema = z.object({
   REDIS_URL: z.string().url().optional(),
   
   // AI Services (optional)
+  GOOGLE_AI_API_KEY: z.string().optional(),
   OPENAI_API_KEY: z.string().optional(),
   ANTHROPIC_API_KEY: z.string().optional(),
   

@@ -857,35 +857,65 @@ async function processGetAnalytics(job: Job<GetAnalyticsJobData>): Promise<any> 
 
     // 5. pg_stat_statements (if available)
     let pgStatStatements: any[] = [];
+    let pgStatStatementsStatus: 'not_installed' | 'installed_not_loaded' | 'active' = 'not_installed';
     try {
       // Check if extension exists
       const [extensionExists] = await userDB.query<any>(
         "SELECT EXISTS (SELECT FROM pg_extension WHERE extname = 'pg_stat_statements') as exists",
         { type: QueryTypes.SELECT }
       );
+      
+      logger.info(`[DB_OPS] pg_stat_statements extension exists: ${extensionExists?.exists}`);
 
       if (extensionExists?.exists) {
-        // Try to fetch top queries by total time
-        // Note: column names changed in PG 13 (total_time -> total_exec_time)
-        pgStatStatements = await userDB.query<any>(
-          `SELECT 
-            query, 
-            calls, 
-            rows,
-            CASE 
-              WHEN current_setting('server_version_num')::int >= 130000 THEN total_exec_time 
-              ELSE total_time 
-            END as total_time_ms,
-            CASE 
-              WHEN current_setting('server_version_num')::int >= 130000 THEN mean_exec_time 
-              ELSE (total_time / NULLIF(calls, 0)) 
-            END as avg_time_ms
-          FROM pg_stat_statements
-          WHERE query NOT LIKE 'SELECT EXISTS%' AND query NOT LIKE 'SELECT pg_database_size%'
-          ORDER BY total_time_ms DESC
-          LIMIT 10`,
-          { type: QueryTypes.SELECT }
-        );
+        // Extension is installed, now check if it's actually loaded (in shared_preload_libraries)
+        // If not loaded, the view exists but is empty and may error
+        try {
+          // First, check the PostgreSQL version to determine column names
+          const [versionResult] = await userDB.query<any>(
+            "SELECT current_setting('server_version_num')::int as version",
+            { type: QueryTypes.SELECT }
+          );
+          const pgVersion = versionResult?.version || 0;
+          logger.info(`[DB_OPS] PostgreSQL version: ${pgVersion}`);
+          
+          // Column names changed in PG 13:
+          // < PG 13: total_time, mean_time
+          // >= PG 13: total_exec_time, mean_exec_time
+          const totalTimeCol = pgVersion >= 130000 ? 'total_exec_time' : 'total_time';
+          const meanTimeCol = pgVersion >= 130000 ? 'mean_exec_time' : 'mean_time';
+          
+          // First check if view has any data at all
+          const [countResult] = await userDB.query<any>(
+            "SELECT count(*) as cnt FROM pg_stat_statements",
+            { type: QueryTypes.SELECT }
+          );
+          logger.info(`[DB_OPS] pg_stat_statements total rows: ${countResult?.cnt}`);
+          
+          if (parseInt(countResult?.cnt || '0') > 0) {
+            pgStatStatements = await userDB.query<any>(
+              `SELECT 
+                query, 
+                calls, 
+                rows,
+                ${totalTimeCol} as total_time_ms,
+                ${meanTimeCol} as avg_time_ms
+              FROM pg_stat_statements
+              WHERE calls > 0
+              ORDER BY ${totalTimeCol} DESC`,
+              { type: QueryTypes.SELECT }
+            );
+            pgStatStatementsStatus = 'active';
+          } else {
+            pgStatStatementsStatus = 'installed_not_loaded';
+          }
+          
+          logger.info(`[DB_OPS] pg_stat_statements status: ${pgStatStatementsStatus}, found ${pgStatStatements.length} queries`);
+        } catch (queryError: any) {
+          // If query fails, extension might be installed but not in shared_preload_libraries
+          logger.warn(`[DB_OPS] pg_stat_statements query failed (likely not in shared_preload_libraries):`, queryError.message);
+          pgStatStatementsStatus = 'installed_not_loaded';
+        }
       }
     } catch (e) {
       logger.warn(`[DB_OPS] Failed to fetch pg_stat_statements for connection ${connectionId}:`, e);
@@ -897,6 +927,7 @@ async function processGetAnalytics(job: Job<GetAnalyticsJobData>): Promise<any> 
       cacheHitRatio: parseFloat(cacheHitResult?.cache_hit_ratio || '100'),
       tableStats,
       pgStatStatements,
+      pgStatStatementsStatus,
       timestamp: new Date().toISOString()
     };
     

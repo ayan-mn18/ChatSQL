@@ -2010,6 +2010,8 @@ export const getConnectionAnalytics = async (req: Request, res: Response): Promi
         activeConnections: dbStats.activeConnections,
         cacheHitRatio: dbStats.cacheHitRatio,
         tableStats: dbStats.tableStats,
+        pgStatStatements: dbStats.pgStatStatements,
+        pgStatStatementsStatus: dbStats.pgStatStatementsStatus,
         timestamp: dbStats.timestamp
       },
       // ChatSQL activity stats (from our queries table)

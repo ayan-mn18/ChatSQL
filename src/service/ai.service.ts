@@ -1,5 +1,5 @@
 import { Sequelize, QueryTypes } from 'sequelize';
-import OpenAI from 'openai';
+import { GoogleGenerativeAI } from '@google/generative-ai';
 import { sequelize } from '../config/db';
 import { decrypt } from '../utils/encryption';
 import { getRedisClient } from '../config/redis';
@@ -14,9 +14,11 @@ import {
 // ============================================
 // AI SERVICE
 // Handles AI-powered SQL generation and query explanation
+// Using Google Gemini 2.0 Flash
 // ============================================
 
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const genAI = new GoogleGenerativeAI(process.env.GOOGLE_AI_API_KEY || '');
+const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
 
 // Cache TTL for AI context (1 hour)
 const AI_CONTEXT_TTL = 3600;
@@ -259,7 +261,8 @@ async function extractRelevantMetadata(
   userQuery: string, 
   fullMetadata: string
 ): Promise<string> {
-  const prompt = `
+  const prompt = `You are a database schema analyzer. Return only JSON.
+
 ### Task:
 - Extract **only the necessary tables, columns, and relationships** required to answer the user's query.
 - Do **not** include unrelated tables or columns.
@@ -288,16 +291,14 @@ ${fullMetadata}
   }
 }`;
 
-  const response = await openai.chat.completions.create({
-    model: 'gpt-4o',
-    messages: [
-      { role: 'system', content: 'You are a database schema analyzer. Return only JSON.' },
-      { role: 'user', content: prompt }
-    ],
-    temperature: 0.3,
+  const result = await model.generateContent({
+    contents: [{ role: 'user', parts: [{ text: prompt }] }],
+    generationConfig: {
+      temperature: 0.3,
+    },
   });
 
-  return response.choices[0].message.content || '{}';
+  return result.response.text() || '{}';
 }
 
 /**
@@ -328,7 +329,11 @@ export async function generateSqlFromPrompt(
   logger.debug(`[AI_SERVICE] Relevant metadata extracted, query history: ${recentQueries.length} recent, ${aiQueries.length} AI-generated`);
   
   // Generate SQL
-  const sqlPrompt = `
+  const sqlPrompt = `${SQL_GENERATION_SYSTEM_PROMPT}
+
+Full Schema:
+${metadataStr}
+
 ### Task:
 Generate an optimized PostgreSQL query based on the user's request.
 
@@ -349,16 +354,14 @@ ${queryHistoryContext}
 
 Return ONLY a JSON object with the query and reasoning.`;
 
-  const response = await openai.chat.completions.create({
-    model: 'gpt-4o',
-    messages: [
-      { role: 'system', content: SQL_GENERATION_SYSTEM_PROMPT + '\n\nFull Schema:\n' + metadataStr },
-      { role: 'user', content: sqlPrompt }
-    ],
-    temperature: 0.2,
+  const result = await model.generateContent({
+    contents: [{ role: 'user', parts: [{ text: sqlPrompt }] }],
+    generationConfig: {
+      temperature: 0.2,
+    },
   });
 
-  const aiResponse = response.choices[0].message.content || '';
+  const aiResponse = result.response.text() || '';
   
   // Parse and sanitize the response
   return parseAIResponse(aiResponse);
@@ -423,7 +426,8 @@ export async function explainSqlQuery(
   // Get schema context for better explanation
   const metadata = await generateDbMetadata(connectionId, []);
   
-  const prompt = `
+  const prompt = `You are a SQL expert. Explain queries clearly and concisely.
+
 ### Task:
 Explain what this SQL query does in plain English. Be clear and concise.
 
@@ -439,16 +443,14 @@ ${sql}
 3. Note any performance considerations
 4. Keep the explanation accessible to non-technical users`;
 
-  const response = await openai.chat.completions.create({
-    model: 'gpt-4o',
-    messages: [
-      { role: 'system', content: 'You are a SQL expert. Explain queries clearly and concisely.' },
-      { role: 'user', content: prompt }
-    ],
-    temperature: 0.3,
+  const result = await model.generateContent({
+    contents: [{ role: 'user', parts: [{ text: prompt }] }],
+    generationConfig: {
+      temperature: 0.3,
+    },
   });
 
-  return response.choices[0].message.content || 'Unable to generate explanation';
+  return result.response.text() || 'Unable to generate explanation';
 }
 
 /**

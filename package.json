@@ -31,6 +31,7 @@
     "@anthropic-ai/sdk": "^0.36.3",
     "@bull-board/api": "^6.15.0",
     "@bull-board/express": "^6.15.0",
+    "@google/generative-ai": "^0.24.1",
     "ai": "^4.1.25",
     "bcrypt": "^6.0.0",
     "bullmq": "^5.65.1",

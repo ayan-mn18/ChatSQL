@@ -80,12 +80,19 @@ export interface ExecuteRawSQLJobData {
   readOnly?: boolean;  // If true, only allows SELECT queries
 }
 
+export interface GetAnalyticsJobData {
+  type: typeof DB_OPERATION_JOBS.GET_ANALYTICS;
+  connectionId: string;
+  userId: string;
+}
+
 export type DBOperationJobData = 
   | SelectQueryJobData 
   | UpdateRowJobData 
   | InsertRowJobData
   | DeleteRowJobData
-  | ExecuteRawSQLJobData;
+  | ExecuteRawSQLJobData
+  | GetAnalyticsJobData;
 
 // Supporting types
 export interface FilterCondition {
@@ -238,6 +245,28 @@ export async function addExecuteRawSQLJob(data: Omit<ExecuteRawSQLJobData, 'type
   );
   
   logger.info(`[DB_OPS] Added RAW SQL job ${job.id}`);
+  return job;
+}
+
+/**
+ * Add a GET_ANALYTICS job to the queue
+ */
+export async function addGetAnalyticsJob(data: Omit<GetAnalyticsJobData, 'type'>): Promise<Job<DBOperationJobData>> {
+  const jobData: GetAnalyticsJobData = {
+    ...data,
+    type: DB_OPERATION_JOBS.GET_ANALYTICS,
+  };
+  
+  const job = await dbOperationsQueue.add(
+    DB_OPERATION_JOBS.GET_ANALYTICS,
+    jobData,
+    {
+      priority: JOB_PRIORITY.HIGH,
+      jobId: `analytics-${data.connectionId}-${Date.now()}`,
+    }
+  );
+  
+  logger.info(`[DB_OPS] Added ANALYTICS job ${job.id}`);
   return job;
 }
 
@@ -726,6 +755,92 @@ async function processExecuteRawSQL(job: Job<ExecuteRawSQLJobData>): Promise<any
   }
 }
 
+/**
+ * Process GET_ANALYTICS job
+ */
+async function processGetAnalytics(job: Job<GetAnalyticsJobData>): Promise<any> {
+  const { connectionId } = job.data;
+  
+  logger.info(`[DB_OPS] Processing GET_ANALYTICS for connection ${connectionId}`);
+  job.updateProgress(10);
+  
+  const userDB = await createUserDBConnection(connectionId);
+  if (!userDB) {
+    throw new Error('Failed to connect to database');
+  }
+  
+  try {
+    job.updateProgress(20);
+    
+    // 1. Database Size
+    const [dbSizeResult] = await userDB.query<any>(
+      'SELECT pg_database_size(current_database()) as size_bytes',
+      { type: QueryTypes.SELECT }
+    );
+    job.updateProgress(40);
+    
+    // 2. Active Connections
+    const [connectionsResult] = await userDB.query<any>(
+      'SELECT count(*) as active_connections FROM pg_stat_activity WHERE datname = current_database()',
+      { type: QueryTypes.SELECT }
+    );
+    job.updateProgress(60);
+    
+    // 3. Cache Hit Ratio
+    const [cacheHitResult] = await userDB.query<any>(
+      `SELECT 
+        sum(heap_blks_hit) as heap_hit, 
+        sum(heap_blks_read) as heap_read,
+        CASE WHEN (sum(heap_blks_hit) + sum(heap_blks_read)) > 0 
+             THEN (sum(heap_blks_hit)::float / (sum(heap_blks_hit) + sum(heap_blks_read)) * 100)
+             ELSE 100 
+        END as cache_hit_ratio
+      FROM pg_statio_user_tables`,
+      { type: QueryTypes.SELECT }
+    );
+    job.updateProgress(80);
+    
+    // 4. Table Statistics (Hot/Cold, Read/Write)
+    const tableStats = await userDB.query<any>(
+      `SELECT 
+        schemaname as schema_name, 
+        relname as table_name, 
+        n_live_tup as row_count,
+        n_dead_tup as dead_rows,
+        pg_total_relation_size(relid) as table_size_bytes,
+        seq_scan, 
+        seq_tup_read, 
+        idx_scan, 
+        idx_tup_fetch,
+        n_tup_ins as insertions, 
+        n_tup_upd as updates, 
+        n_tup_del as deletions,
+        (n_tup_ins + n_tup_upd + n_tup_del) as total_writes,
+        (seq_tup_read + idx_tup_fetch) as total_reads
+      FROM pg_stat_user_tables
+      WHERE schemaname NOT IN ('pg_catalog', 'information_schema')
+      ORDER BY (n_tup_ins + n_tup_upd + n_tup_del + seq_tup_read + idx_tup_fetch) DESC
+      LIMIT 50`,
+      { type: QueryTypes.SELECT }
+    );
+    
+    return {
+      dbSize: parseInt(dbSizeResult?.size_bytes || '0'),
+      activeConnections: parseInt(connectionsResult?.active_connections || '0'),
+      cacheHitRatio: parseFloat(cacheHitResult?.cache_hit_ratio || '100'),
+      tableStats,
+      timestamp: new Date().toISOString()
+    };
+    
+  } catch (error: any) {
+    logger.error(`[DB_OPS] Get analytics failed for connection ${connectionId}:`, error);
+    throw error;
+  } finally {
+    await userDB.close();
+    job.updateProgress(100);
+  }
+}
+
 // ============================================
 // WORKER CREATION
 // ============================================
@@ -755,6 +870,9 @@ export function createDBOperationsWorker(): Worker<DBOperationJobData> {
           
           case DB_OPERATION_JOBS.EXECUTE_RAW_SQL:
             return await processExecuteRawSQL(job as Job<ExecuteRawSQLJobData>);
+          
+          case DB_OPERATION_JOBS.GET_ANALYTICS:
+            return await processGetAnalytics(job as Job<GetAnalyticsJobData>);
           
           default:
             throw new Error(`Unknown job type: ${(job.data as any).type}`);

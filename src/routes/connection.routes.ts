@@ -98,6 +98,13 @@ router.get('/:id/schemas/:schemaName/tables', authenticate, connectionController
  */
 router.get('/:id/relations', authenticate, connectionController.getRelations);
 
+/**
+ * @route   GET /api/connections/:id/analytics
+ * @desc    Get real-time database analytics and statistics
+ * @access  Private
+ */
+router.get('/:id/analytics', authenticate, validate(uuidParamSchema), connectionController.getConnectionAnalytics);
+
 // ============================================
 // TABLE DATA ROUTES
 // ============================================

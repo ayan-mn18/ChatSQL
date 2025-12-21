@@ -10,6 +10,7 @@ import {
   addInsertRowJob, 
   addDeleteRowJob,
   addExecuteRawSQLJob,
+  addGetAnalyticsJob,
   waitForJobResult,
   SelectQueryResult,
   MutationResult,
@@ -1812,6 +1813,106 @@ export const executeQuery = async (req: Request, res: Response): Promise<void> =
       success: false,
       error: error.message || 'Failed to execute query',
       code: 'EXECUTE_QUERY_ERROR'
+    });
+  }
+};
+
+/**
+ * Get real-time database analytics and statistics
+ * GET /api/connections/:id/analytics
+ */
+export const getConnectionAnalytics = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const { id } = req.params;
+    const userId = req.userId;
+    logger.info(`[CONNECTION] Get analytics request for connection: ${id}`);
+    
+    // 1. Verify connection exists and belongs to user
+    const [connectionResult] = await sequelize.query<{ id: string }>(
+      `SELECT id FROM connections WHERE id = :id AND user_id = :userId`,
+      {
+        replacements: { id, userId },
+        type: QueryTypes.SELECT
+      }
+    );
+    
+    if (!connectionResult) {
+      res.status(404).json({
+        success: false,
+        error: 'Connection not found',
+        code: 'CONNECTION_NOT_FOUND'
+      });
+      return;
+    }
+    
+    // 2. Check Redis cache first (1 minute TTL for analytics)
+    const cacheKey = `connection:${id}:analytics`;
+    const cached = await getFromCache<any>(cacheKey);
+    
+    if (cached) {
+      logger.info(`[CONNECTION] Returning cached analytics for connection: ${id}`);
+      res.json({
+        success: true,
+        ...cached.data,
+        cached: true,
+        cachedAt: cached.cachedAt
+      });
+      return;
+    }
+    
+    // 3. Get stats from our own database (Query History)
+    const [queryStats] = await sequelize.query<any>(
+      `SELECT 
+        count(*) as total_queries,
+        count(*) FILTER (WHERE is_ai_generated = true) as ai_queries,
+        count(*) FILTER (WHERE is_ai_generated = true AND status = 'success') as ai_success_count,
+        avg(execution_time_ms) as avg_execution_time,
+        count(*) FILTER (WHERE status = 'error') as error_count
+      FROM queries 
+      WHERE connection_id = :id`,
+      {
+        replacements: { id },
+        type: QueryTypes.SELECT
+      }
+    );
+    
+    // 4. Add job to queue to get real-time stats from user's DB
+    const job = await addGetAnalyticsJob({
+      connectionId: id,
+      userId: userId!,
+    });
+    
+    // Wait for job result
+    const dbStats = await waitForJobResult<any>(job, 30000);
+    
+    // 5. Combine and format results
+    const analyticsData = {
+      ...dbStats,
+      queryStats: {
+        totalQueries: parseInt(queryStats?.total_queries || '0'),
+        aiQueries: parseInt(queryStats?.ai_queries || '0'),
+        aiSuccessRate: queryStats?.ai_queries > 0 
+          ? Math.round((queryStats.ai_success_count / queryStats.ai_queries) * 100) 
+          : 100,
+        avgExecutionTime: Math.round(parseFloat(queryStats?.avg_execution_time || '0')),
+        errorCount: parseInt(queryStats?.error_count || '0')
+      }
+    };
+    
+    // 6. Cache result (1 minute TTL)
+    await setCache(cacheKey, analyticsData, 60);
+    
+    res.json({
+      success: true,
+      ...analyticsData,
+      cached: false
+    });
+  } catch (error: any) {
+    logger.error('[CONNECTION] Get analytics failed:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to get analytics',
+      code: 'ANALYTICS_FETCH_ERROR'
     });
   }
 };

@@ -36,6 +36,7 @@ export const DB_OPERATION_JOBS = {
   INSERT_ROW: 'insert-row',
   DELETE_ROW: 'delete-row',
   EXECUTE_RAW_SQL: 'execute-raw-sql',
+  GET_ANALYTICS: 'get-analytics',
 } as const;
 
 // Default job options for Schema Sync

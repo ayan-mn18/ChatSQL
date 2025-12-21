@@ -19,13 +19,13 @@ let connectionLimiter: RateLimiterRedis | RateLimiterMemory | null = null;
 const RATE_LIMITS = {
   // Global: DDoS protection
   global: {
-    points: 1000,       // 1000 requests
+    points: 2000,       // 2000 requests (Increased from 1000)
     duration: 60,       // Per minute
     blockDuration: 60,  // Block for 1 minute if exceeded
   },
   // Auth: Prevent brute force
   auth: {
-    points: 10,         // 10 auth attempts
+    points: 20,         // 20 auth attempts (Increased from 10)
     duration: 60,       // Per minute
     blockDuration: 300, // Block for 5 minutes
   },
@@ -37,13 +37,13 @@ const RATE_LIMITS = {
   },
   // Heavy: Schema sync and other heavy operations
   heavy: {
-    points: 5,          // 5 heavy operations
+    points: 10,          // 10 heavy operations (Increased from 5)
     duration: 300,      // Per 5 minutes
     blockDuration: 60,  // Block for 1 minute
   },
   // Connection: Test/create connection
   connection: {
-    points: 10,         // 10 connection operations
+    points: 20,         // 20 connection operations (Increased from 10)
     duration: 60,       // Per minute
     blockDuration: 30,  // Block for 30 seconds
   },

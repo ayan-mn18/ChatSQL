@@ -2,6 +2,7 @@ import { Request, Response, NextFunction } from 'express';
 import * as authService from '../services/auth.service';
 import * as emailService from '../services/email.service';
 import { generateAccessToken, getAccessTokenCookieOptions, generateRandomToken } from '../utils/auth';
+import { logger } from '../utils/logger';
 
 /**
  * Register a new user (Step 1: Send OTP)
@@ -155,7 +156,32 @@ export const verifyEmail = async (
     // 8. Update last login
     await authService.updateLastLogin(verifiedUser.id);
 
-    // 9. Return user data
+    // 9. Trigger schema refresh for all user connections
+    try {
+      const { addRefreshSchemaJob } = await import('../queues/schema-sync.queue');
+      const { QueryTypes } = await import('sequelize');
+      const { sequelize } = await import('../config/db');
+      
+      const connections = await sequelize.query<{ id: string }>(
+        `SELECT id FROM connections WHERE user_id = $1`,
+        {
+          bind: [verifiedUser.id],
+          type: QueryTypes.SELECT
+        }
+      );
+
+      for (const conn of connections) {
+        await addRefreshSchemaJob({
+          connectionId: conn.id,
+          userId: verifiedUser.id
+        });
+      }
+      logger.info(`[AUTH] Triggered schema refresh for ${connections.length} connections on verification`, { userId: verifiedUser.id });
+    } catch (refreshError) {
+      logger.error('[AUTH] Failed to trigger schema refresh on verification:', refreshError);
+    }
+
+    // 10. Return user data
     res.status(200).json({
       success: true,
       message: 'Email verified successfully',
@@ -311,7 +337,33 @@ export const login = async (
     // 7. Set cookie
     res.cookie('chatsql-access-token', accessToken, getAccessTokenCookieOptions());
 
-    // 8. Return user data
+    // 8. Trigger schema refresh for all user connections
+    try {
+      const { addRefreshSchemaJob } = await import('../queues/schema-sync.queue');
+      const { QueryTypes } = await import('sequelize');
+      const { sequelize } = await import('../config/db');
+      
+      const connections = await sequelize.query<{ id: string }>(
+        `SELECT id FROM connections WHERE user_id = $1`,
+        {
+          bind: [user.id],
+          type: QueryTypes.SELECT
+        }
+      );
+
+      for (const conn of connections) {
+        await addRefreshSchemaJob({
+          connectionId: conn.id,
+          userId: user.id
+        });
+      }
+      logger.info(`[AUTH] Triggered schema refresh for ${connections.length} connections on login`, { userId: user.id });
+    } catch (refreshError) {
+      logger.error('[AUTH] Failed to trigger schema refresh on login:', refreshError);
+      // Don't fail login if refresh trigger fails
+    }
+
+    // 9. Return user data
     res.status(200).json({
       success: true,
       message: 'Login successful',

@@ -975,66 +975,51 @@ export const syncSchema = async (req: Request, res: Response): Promise<void> => 
     const { id } = req.params;
     const userId = req.userId;
     
-    // TODO: Implement schema sync logic
-    // This can be called manually or triggered automatically after connection save
-    // 
-    // QUERIES TO RUN ON EXTERNAL DB:
-    // 
-    // 1. Get all PostgreSQL schemas:
-    //    SELECT schema_name 
-    //    FROM information_schema.schemata 
-    //    WHERE schema_name NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
-    //      AND schema_name NOT LIKE 'pg_temp%'
-    //
-    // 2. Get all tables with their schemas:
-    //    SELECT table_schema, table_name, table_type
-    //    FROM information_schema.tables 
-    //    WHERE table_schema NOT IN ('pg_catalog', 'information_schema')
-    //      AND table_type IN ('BASE TABLE', 'VIEW')
-    // 
-    // 3. Get columns for each table:
-    //    SELECT 
-    //      column_name, data_type, udt_name, is_nullable, 
-    //      column_default, character_maximum_length, numeric_precision
-    //    FROM information_schema.columns
-    //    WHERE table_schema = $1 AND table_name = $2
-    //    ORDER BY ordinal_position
-    //
-    // 4. Get primary keys:
-    //    SELECT kcu.column_name
-    //    FROM information_schema.table_constraints tc
-    //    JOIN information_schema.key_column_usage kcu 
-    //      ON tc.constraint_name = kcu.constraint_name
-    //    WHERE tc.table_schema = $1 AND tc.table_name = $2 
-    //      AND tc.constraint_type = 'PRIMARY KEY'
-    // 
-    // 5. Get foreign keys:
-    //    SELECT
-    //      tc.table_schema AS source_schema,
-    //      tc.table_name AS source_table, 
-    //      kcu.column_name AS source_column,
-    //      ccu.table_schema AS target_schema,
-    //      ccu.table_name AS target_table,
-    //      ccu.column_name AS target_column,
-    //      tc.constraint_name
-    //    FROM information_schema.table_constraints AS tc
-    //    JOIN information_schema.key_column_usage AS kcu 
-    //      ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema
-    //    JOIN information_schema.constraint_column_usage AS ccu 
-    //      ON ccu.constraint_name = tc.constraint_name
-    //    WHERE tc.constraint_type = 'FOREIGN KEY'
-    //
-    // 6. Get table sizes and row counts (optional, can be expensive):
-    //    SELECT 
-    //      schemaname, relname, 
-    //      pg_size_pretty(pg_relation_size(relid)) as size,
-    //      n_live_tup as row_count
-    //    FROM pg_stat_user_tables
+    if (!userId) {
+      res.status(401).json({
+        success: false,
+        error: 'User not authenticated',
+        code: 'UNAUTHORIZED'
+      });
+      return;
+    }
 
-    res.status(501).json({
-      success: false,
-      error: 'Not implemented yet',
-      code: 'NOT_IMPLEMENTED'
+    // 1. Verify connection exists and belongs to user
+    const connection = await sequelize.query<{ id: string; name: string }>(
+      `SELECT id, name FROM connections WHERE id = $1 AND user_id = $2`,
+      {
+        bind: [id, userId],
+        type: QueryTypes.SELECT
+      }
+    );
+
+    if (connection.length === 0) {
+      res.status(404).json({
+        success: false,
+        error: 'Connection not found',
+        code: 'CONNECTION_NOT_FOUND'
+      });
+      return;
+    }
+
+    // 2. Queue schema sync job
+    const { addRefreshSchemaJob } = await import('../queues/schema-sync.queue');
+    const job = await addRefreshSchemaJob({
+      connectionId: id,
+      userId: userId
+    });
+
+    logger.info('[CONNECTION] Schema refresh job queued', {
+      connectionId: id,
+      jobId: job.id
+    });
+
+    res.status(200).json({
+      success: true,
+      message: 'Schema refresh job queued successfully',
+      data: {
+        jobId: job.id
+      }
     });
   } catch (error: any) {
     logger.error('[CONNECTION] Sync schema failed:', error);

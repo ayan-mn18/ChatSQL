@@ -3,6 +3,7 @@ import * as authService from '../services/auth.service';
 import * as emailService from '../services/email.service';
 import { generateAccessToken, getAccessTokenCookieOptions, generateRandomToken } from '../utils/auth';
 import { logger } from '../utils/logger';
+import { logViewerActivity } from '../services/viewer-activity.service';
 
 /**
  * Register a new user (Step 1: Send OTP)
@@ -327,6 +328,16 @@ export const login = async (
 
     // 5. Update last_login_at
     await authService.updateLastLogin(user.id);
+
+    if (user.role === 'viewer') {
+      await logViewerActivity({
+        viewerUserId: user.id,
+        actionType: 'login',
+        ipAddress: req.ip,
+        userAgent: req.get('user-agent') || null,
+        actionDetails: null,
+      });
+    }
 
     // 6. Generate JWT token
     const accessToken = generateAccessToken({
@@ -653,6 +664,16 @@ export const changePassword = async (
 
     // 3. Update password in database
     await authService.updatePassword(userId, newPassword);
+
+    if (user.role === 'viewer') {
+      await logViewerActivity({
+        viewerUserId: userId,
+        actionType: 'password_changed',
+        ipAddress: req.ip,
+        userAgent: req.get('user-agent') || null,
+        actionDetails: null,
+      });
+    }
 
     // 4. Return success message
     res.status(200).json({

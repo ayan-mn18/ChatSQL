@@ -5,6 +5,8 @@ import * as authService from '../services/auth.service';
 import { sequelize } from '../config/db';
 import { QueryTypes } from 'sequelize';
 import { logger } from '../utils/logger';
+import { getViewerActivityLog, logViewerActivity } from '../services/viewer-activity.service';
+import { getRecentQueryHistoryByUser } from '../service/query-history.service';
 
 /**
  * Create a new viewer
@@ -348,6 +350,14 @@ export const extendViewerExpiry = async (req: Request, res: Response): Promise<v
         newExpiresAt: viewer.expires_at
       }
     });
+
+    await logViewerActivity({
+      viewerUserId: viewerId,
+      actionType: 'access_extended',
+      actionDetails: { adminUserId, additionalHours, newExpiresAt: viewer.expires_at },
+      ipAddress: req.ip,
+      userAgent: req.get('user-agent') || null,
+    });
   } catch (error: any) {
     logger.error('❌ [VIEWER] Extend viewer expiry error:', error);
     res.status(500).json({
@@ -394,6 +404,14 @@ export const updateViewerPermissions = async (req: Request, res: Response): Prom
     res.status(200).json({
       success: true,
       message: 'Viewer permissions updated successfully'
+    });
+
+    await logViewerActivity({
+      viewerUserId: viewerId,
+      actionType: 'permissions_updated',
+      actionDetails: { adminUserId, permissionsCount: permissions.length },
+      ipAddress: req.ip,
+      userAgent: req.get('user-agent') || null,
     });
   } catch (error: any) {
     logger.error('❌ [VIEWER] Update permissions error:', error);
@@ -575,5 +593,311 @@ export const getCurrentUserRole = async (req: Request, res: Response): Promise<v
       success: false,
       error: 'Failed to get user role'
     });
+  }
+};
+
+/**
+ * Get current viewer's own access details (permissions + expiry)
+ * GET /api/viewers/me
+ */
+export const getMyAccess = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const viewerUserId = req.userId;
+    if (!viewerUserId) {
+      res.status(401).json({ success: false, error: 'Unauthorized' });
+      return;
+    }
+
+    const viewer = await viewerService.getViewerSelf(viewerUserId);
+    if (!viewer) {
+      res.status(404).json({ success: false, error: 'Viewer not found' });
+      return;
+    }
+
+    res.status(200).json({
+      success: true,
+      data: {
+        id: viewer.id,
+        email: viewer.email,
+        username: viewer.username,
+        isTemporary: viewer.is_temporary,
+        expiresAt: viewer.expires_at,
+        isActive: viewer.is_active,
+        mustChangePassword: viewer.must_change_password,
+        createdAt: viewer.created_at,
+        permissions: viewer.permissions.map(p => ({
+          connectionId: p.connection_id,
+          connectionName: p.connection_name,
+          schemaName: p.schema_name,
+          tableName: p.table_name,
+          canSelect: p.can_select,
+          canInsert: p.can_insert,
+          canUpdate: p.can_update,
+          canDelete: p.can_delete,
+          canUseAi: p.can_use_ai,
+          canViewAnalytics: p.can_view_analytics,
+          canExport: p.can_export,
+        })),
+      },
+    });
+  } catch (error: any) {
+    logger.error('❌ [VIEWER] Get my access error:', error);
+    res.status(500).json({ success: false, error: 'Failed to get access details' });
+  }
+};
+
+/**
+ * Create an access request for the current viewer
+ * POST /api/viewers/me/access-requests
+ */
+export const createMyAccessRequest = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const viewerUserId = req.userId;
+    if (!viewerUserId) {
+      res.status(401).json({ success: false, error: 'Unauthorized' });
+      return;
+    }
+
+    const { connectionId, schemaName, tableName, additionalHours, requestedPermissions } = req.body as {
+      connectionId?: string;
+      schemaName?: string | null;
+      tableName?: string | null;
+      additionalHours?: number;
+      requestedPermissions?: viewerService.ViewerPermission[];
+    };
+
+    const hasHours = typeof additionalHours === 'number' && additionalHours > 0;
+    const hasPerms = Array.isArray(requestedPermissions) && requestedPermissions.length > 0;
+
+    if (!hasHours && !hasPerms) {
+      res.status(400).json({ success: false, error: 'Provide additionalHours and/or requestedPermissions' });
+      return;
+    }
+
+    const created = await viewerService.createViewerAccessRequest({
+      viewerUserId,
+      connectionId: connectionId ?? null,
+      schemaName: schemaName ?? null,
+      tableName: tableName ?? null,
+      requestedAdditionalHours: hasHours ? additionalHours! : null,
+      requestedPermissions: hasPerms ? requestedPermissions : null,
+    });
+
+    await logViewerActivity({
+      viewerUserId,
+      connectionId: connectionId ?? null,
+      actionType: 'access_request_created',
+      actionDetails: {
+        requestId: created.id,
+        requestedAdditionalHours: hasHours ? additionalHours : null,
+        requestedPermissionsCount: hasPerms ? requestedPermissions!.length : 0,
+      },
+      ipAddress: req.ip,
+      userAgent: req.get('user-agent') || null,
+    });
+
+    res.status(201).json({ success: true, data: { requestId: created.id } });
+  } catch (error: any) {
+    logger.error('❌ [VIEWER] Create access request error:', error);
+    res.status(500).json({ success: false, error: 'Failed to create access request' });
+  }
+};
+
+/**
+ * List access requests for the current admin
+ * GET /api/viewers/access-requests
+ */
+export const getAccessRequests = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const adminUserId = req.userId;
+    if (!adminUserId) {
+      res.status(401).json({ success: false, error: 'Unauthorized' });
+      return;
+    }
+
+    const isAdmin = await viewerService.isSuperAdmin(adminUserId);
+    if (!isAdmin) {
+      res.status(403).json({ success: false, error: 'Only super admins can view access requests' });
+      return;
+    }
+
+    const requests = await viewerService.getAccessRequestsForAdmin(adminUserId);
+
+    res.status(200).json({
+      success: true,
+      data: requests.map(r => ({
+        id: r.id,
+        viewerUserId: r.viewer_user_id,
+        viewerEmail: r.viewer_email,
+        viewerUsername: r.viewer_username,
+        connectionId: r.connection_id,
+        schemaName: r.schema_name,
+        tableName: r.table_name,
+        requestedAdditionalHours: r.requested_additional_hours,
+        requestedPermissions: r.requested_permissions,
+        status: r.status,
+        decisionReason: r.decision_reason,
+        decidedAt: r.decided_at,
+        createdAt: r.created_at,
+      })),
+    });
+  } catch (error: any) {
+    logger.error('❌ [VIEWER] Get access requests error:', error);
+    res.status(500).json({ success: false, error: 'Failed to get access requests' });
+  }
+};
+
+/**
+ * Approve an access request
+ * POST /api/viewers/access-requests/:requestId/approve
+ */
+export const approveAccessRequest = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const adminUserId = req.userId;
+    if (!adminUserId) {
+      res.status(401).json({ success: false, error: 'Unauthorized' });
+      return;
+    }
+
+    const isAdmin = await viewerService.isSuperAdmin(adminUserId);
+    if (!isAdmin) {
+      res.status(403).json({ success: false, error: 'Only super admins can approve access requests' });
+      return;
+    }
+
+    const { reason } = req.body as { reason?: string };
+    const updated = await viewerService.decideAccessRequest({
+      requestId: req.params.requestId,
+      adminUserId,
+      decision: 'approved',
+      reason: reason ?? null,
+    });
+
+    await logViewerActivity({
+      viewerUserId: updated.viewer_user_id,
+      connectionId: updated.connection_id,
+      actionType: 'access_request_approved',
+      actionDetails: { requestId: updated.id, adminUserId, reason: reason ?? null },
+      ipAddress: req.ip,
+      userAgent: req.get('user-agent') || null,
+    });
+
+    res.status(200).json({ success: true });
+  } catch (error: any) {
+    logger.error('❌ [VIEWER] Approve access request error:', error);
+    res.status(500).json({ success: false, error: error.message || 'Failed to approve request' });
+  }
+};
+
+/**
+ * Deny an access request
+ * POST /api/viewers/access-requests/:requestId/deny
+ */
+export const denyAccessRequest = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const adminUserId = req.userId;
+    if (!adminUserId) {
+      res.status(401).json({ success: false, error: 'Unauthorized' });
+      return;
+    }
+
+    const isAdmin = await viewerService.isSuperAdmin(adminUserId);
+    if (!isAdmin) {
+      res.status(403).json({ success: false, error: 'Only super admins can deny access requests' });
+      return;
+    }
+
+    const { reason } = req.body as { reason?: string };
+    const updated = await viewerService.decideAccessRequest({
+      requestId: req.params.requestId,
+      adminUserId,
+      decision: 'denied',
+      reason: reason ?? null,
+    });
+
+    await logViewerActivity({
+      viewerUserId: updated.viewer_user_id,
+      connectionId: updated.connection_id,
+      actionType: 'access_request_denied',
+      actionDetails: { requestId: updated.id, adminUserId, reason: reason ?? null },
+      ipAddress: req.ip,
+      userAgent: req.get('user-agent') || null,
+    });
+
+    res.status(200).json({ success: true });
+  } catch (error: any) {
+    logger.error('❌ [VIEWER] Deny access request error:', error);
+    res.status(500).json({ success: false, error: error.message || 'Failed to deny request' });
+  }
+};
+
+/**
+ * Get viewer activity log (admin only)
+ * GET /api/viewers/:id/activity
+ */
+export const getViewerActivity = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const adminUserId = req.userId;
+    const viewerId = req.params.id;
+    if (!adminUserId) {
+      res.status(401).json({ success: false, error: 'Unauthorized' });
+      return;
+    }
+
+    const isAdmin = await viewerService.isSuperAdmin(adminUserId);
+    if (!isAdmin) {
+      res.status(403).json({ success: false, error: 'Only super admins can view activity' });
+      return;
+    }
+
+    // ownership check
+    const viewer = await viewerService.getViewerById(viewerId, adminUserId);
+    if (!viewer) {
+      res.status(404).json({ success: false, error: 'Viewer not found' });
+      return;
+    }
+
+    const limit = typeof req.query.limit === 'string' ? parseInt(req.query.limit, 10) : 50;
+    const entries = await getViewerActivityLog(viewerId, limit);
+
+    res.status(200).json({ success: true, data: entries });
+  } catch (error: any) {
+    logger.error('❌ [VIEWER] Get viewer activity error:', error);
+    res.status(500).json({ success: false, error: 'Failed to get viewer activity' });
+  }
+};
+
+/**
+ * Get viewer query history (admin only)
+ * GET /api/viewers/:id/queries
+ */
+export const getViewerQueries = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const adminUserId = req.userId;
+    const viewerId = req.params.id;
+    if (!adminUserId) {
+      res.status(401).json({ success: false, error: 'Unauthorized' });
+      return;
+    }
+
+    const isAdmin = await viewerService.isSuperAdmin(adminUserId);
+    if (!isAdmin) {
+      res.status(403).json({ success: false, error: 'Only super admins can view queries' });
+      return;
+    }
+
+    // ownership check
+    const viewer = await viewerService.getViewerById(viewerId, adminUserId);
+    if (!viewer) {
+      res.status(404).json({ success: false, error: 'Viewer not found' });
+      return;
+    }
+
+    const limit = typeof req.query.limit === 'string' ? parseInt(req.query.limit, 10) : 50;
+    const queries = await getRecentQueryHistoryByUser(viewerId, limit);
+    res.status(200).json({ success: true, data: queries });
+  } catch (error: any) {
+    logger.error('❌ [VIEWER] Get viewer queries error:', error);
+    res.status(500).json({ success: false, error: 'Failed to get viewer queries' });
   }
 };

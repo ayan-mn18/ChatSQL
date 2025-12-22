@@ -12,6 +12,41 @@ const router = Router();
 router.get('/me/role', authenticate, viewerController.getCurrentUserRole);
 
 /**
+ * @route   GET /api/viewers/me
+ * @desc    Get current viewer's access details
+ * @access  Private
+ */
+router.get('/me', authenticate, viewerController.getMyAccess);
+
+/**
+ * @route   POST /api/viewers/me/access-requests
+ * @desc    Create an access request for current viewer
+ * @access  Private
+ */
+router.post('/me/access-requests', authenticate, viewerController.createMyAccessRequest);
+
+/**
+ * @route   GET /api/viewers/access-requests
+ * @desc    List access requests for current admin
+ * @access  Private (Super Admin only)
+ */
+router.get('/access-requests', authenticate, viewerController.getAccessRequests);
+
+/**
+ * @route   POST /api/viewers/access-requests/:requestId/approve
+ * @desc    Approve access request
+ * @access  Private (Super Admin only)
+ */
+router.post('/access-requests/:requestId/approve', authenticate, viewerController.approveAccessRequest);
+
+/**
+ * @route   POST /api/viewers/access-requests/:requestId/deny
+ * @desc    Deny access request
+ * @access  Private (Super Admin only)
+ */
+router.post('/access-requests/:requestId/deny', authenticate, viewerController.denyAccessRequest);
+
+/**
  * @route   POST /api/viewers
  * @desc    Create a new viewer
  * @access  Private (Super Admin only)
@@ -24,6 +59,20 @@ router.post('/', authenticate, viewerController.createViewer);
  * @access  Private (Super Admin only)
  */
 router.get('/', authenticate, viewerController.getViewers);
+
+/**
+ * @route   GET /api/viewers/:id/activity
+ * @desc    Get viewer activity log
+ * @access  Private (Super Admin only)
+ */
+router.get('/:id/activity', authenticate, viewerController.getViewerActivity);
+
+/**
+ * @route   GET /api/viewers/:id/queries
+ * @desc    Get viewer query history
+ * @access  Private (Super Admin only)
+ */
+router.get('/:id/queries', authenticate, viewerController.getViewerQueries);
 
 /**
  * @route   GET /api/viewers/:id

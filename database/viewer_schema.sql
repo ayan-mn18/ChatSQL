@@ -147,6 +147,29 @@ CREATE INDEX IF NOT EXISTS idx_viewer_activity_type ON viewer_activity_log(actio
 CREATE INDEX IF NOT EXISTS idx_viewer_activity_created ON viewer_activity_log(created_at);
 
 -- ============================================
+-- VIEWER ACCESS REQUESTS TABLE
+-- Viewers can request extensions/permission changes; admins approve/deny.
+-- ============================================
+CREATE TABLE IF NOT EXISTS viewer_access_requests (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    viewer_user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    connection_id UUID REFERENCES connections(id) ON DELETE SET NULL,
+    schema_name VARCHAR(255),
+    table_name VARCHAR(255),
+    requested_additional_hours INTEGER,
+    requested_permissions JSONB,
+    status VARCHAR(50) NOT NULL DEFAULT 'pending', -- pending, approved, denied, cancelled
+    decided_by_user_id UUID REFERENCES users(id) ON DELETE SET NULL,
+    decision_reason TEXT,
+    decided_at TIMESTAMP WITH TIME ZONE,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_viewer_access_requests_viewer ON viewer_access_requests(viewer_user_id);
+CREATE INDEX IF NOT EXISTS idx_viewer_access_requests_status ON viewer_access_requests(status);
+CREATE INDEX IF NOT EXISTS idx_viewer_access_requests_created ON viewer_access_requests(created_at);
+
+-- ============================================
 -- HELPER FUNCTION: Check if user has permission on table
 -- Returns TRUE if user has the specified permission
 -- ============================================

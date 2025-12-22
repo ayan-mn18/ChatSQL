@@ -17,6 +17,7 @@ import { decrypt } from '../utils/encryption';
 import { logger } from '../utils/logger';
 import { CACHE_KEYS, deleteCache, invalidateConnectionCache } from '../utils/cache';
 import { saveQuery } from '../service/query-history.service';
+import { logViewerActivity } from '../services/viewer-activity.service';
 
 // ============================================
 // DB OPERATIONS QUEUE
@@ -758,6 +759,19 @@ async function processExecuteRawSQL(job: Job<ExecuteRawSQLJobData>): Promise<any
     }).catch((err: Error) => {
       logger.warn(`[DB_OPS] Failed to save query history: ${err.message}`);
     });
+
+    logViewerActivity({
+      viewerUserId: userId,
+      connectionId,
+      actionType: 'query_executed',
+      actionDetails: {
+        status: 'success',
+        rowCount,
+        executionTimeMs: executionTime,
+      },
+    }).catch(() => {
+      // swallow
+    });
     
     return {
       success: true,
@@ -776,6 +790,18 @@ async function processExecuteRawSQL(job: Job<ExecuteRawSQLJobData>): Promise<any
       errorMessage: error.message,
     }).catch((err: Error) => {
       logger.warn(`[DB_OPS] Failed to save query history: ${err.message}`);
+    });
+
+    logViewerActivity({
+      viewerUserId: userId,
+      connectionId,
+      actionType: 'query_executed',
+      actionDetails: {
+        status: 'error',
+        errorMessage: error.message,
+      },
+    }).catch(() => {
+      // swallow
     });
     
     throw error;

@@ -187,6 +187,46 @@ export async function getRecentQueryHistory(
 }
 
 /**
+ * Get recent query history for a specific user (across connections)
+ */
+export async function getRecentQueryHistoryByUser(
+  userId: string,
+  limit: number = 50
+): Promise<QueryHistoryEntry[]> {
+  try {
+    const safeLimit = Math.max(1, Math.min(200, limit));
+
+    const queries = await sequelize.query<QueryHistoryEntry>(
+      `SELECT
+        id,
+        user_id as "userId",
+        connection_id as "connectionId",
+        query_text as "queryText",
+        row_count as "rowCount",
+        execution_time_ms as "executionTimeMs",
+        status,
+        error_message as "errorMessage",
+        is_ai_generated as "isAiGenerated",
+        ai_prompt as "aiPrompt",
+        created_at as "createdAt"
+      FROM queries
+      WHERE user_id = :userId
+      ORDER BY created_at DESC
+      LIMIT :limit`,
+      {
+        replacements: { userId, limit: safeLimit },
+        type: QueryTypes.SELECT,
+      }
+    );
+
+    return queries;
+  } catch (error) {
+    logger.error('[QUERY_HISTORY] Failed to get user query history:', error);
+    return [];
+  }
+}
+
+/**
  * Get AI-generated queries for a connection (for learning patterns)
  */
 export async function getAIGeneratedQueries(

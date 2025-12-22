@@ -63,6 +63,23 @@ export interface ViewerPermissionRecord {
   can_export: boolean;
 }
 
+export interface ViewerAccessRequest {
+  id: string;
+  viewer_user_id: string;
+  connection_id: string | null;
+  schema_name: string | null;
+  table_name: string | null;
+  requested_additional_hours: number | null;
+  requested_permissions: any;
+  status: 'pending' | 'approved' | 'denied' | 'cancelled';
+  decided_by_user_id: string | null;
+  decision_reason: string | null;
+  decided_at: Date | null;
+  created_at: Date;
+  viewer_email?: string;
+  viewer_username?: string | null;
+}
+
 // ============================================
 // HELPER FUNCTIONS
 // ============================================
@@ -299,6 +316,165 @@ export const getViewerById = async (viewerId: string, adminUserId: string): Prom
   );
   
   return { ...viewer, permissions };
+};
+
+/**
+ * Get current viewer's own record and permissions
+ */
+export const getViewerSelf = async (viewerUserId: string): Promise<ViewerWithPermissions | null> => {
+  const [viewer] = await sequelize.query<Viewer>(
+    `SELECT
+      id, email, username, role, is_temporary, expires_at,
+      is_active, must_change_password, created_by_user_id, created_at
+     FROM users
+     WHERE id = :viewerUserId AND role = 'viewer'
+     LIMIT 1`,
+    { replacements: { viewerUserId }, type: QueryTypes.SELECT }
+  );
+
+  if (!viewer) return null;
+
+  const permissions = await sequelize.query<ViewerPermissionRecord>(
+    `SELECT vp.*, c.name as connection_name
+     FROM viewer_permissions vp
+     JOIN connections c ON vp.connection_id = c.id
+     WHERE vp.viewer_user_id = :viewerUserId`,
+    { replacements: { viewerUserId }, type: QueryTypes.SELECT }
+  );
+
+  return { ...viewer, permissions };
+};
+
+// ============================================
+// ACCESS REQUESTS
+// ============================================
+
+export const createViewerAccessRequest = async (params: {
+  viewerUserId: string;
+  connectionId?: string | null;
+  schemaName?: string | null;
+  tableName?: string | null;
+  requestedAdditionalHours?: number | null;
+  requestedPermissions?: ViewerPermission[] | null;
+}): Promise<ViewerAccessRequest> => {
+  const [request] = await sequelize.query<ViewerAccessRequest>(
+    `INSERT INTO viewer_access_requests (
+      viewer_user_id,
+      connection_id,
+      schema_name,
+      table_name,
+      requested_additional_hours,
+      requested_permissions
+    ) VALUES (
+      :viewerUserId,
+      :connectionId,
+      :schemaName,
+      :tableName,
+      :requestedAdditionalHours,
+      :requestedPermissions
+    ) RETURNING *`,
+    {
+      replacements: {
+        viewerUserId: params.viewerUserId,
+        connectionId: params.connectionId ?? null,
+        schemaName: params.schemaName ?? null,
+        tableName: params.tableName ?? null,
+        requestedAdditionalHours: params.requestedAdditionalHours ?? null,
+        requestedPermissions: params.requestedPermissions
+          ? JSON.stringify(params.requestedPermissions)
+          : null,
+      },
+      type: QueryTypes.SELECT,
+    }
+  );
+
+  if (!request) throw new Error('Failed to create access request');
+  return request;
+};
+
+export const getAccessRequestsForAdmin = async (adminUserId: string): Promise<ViewerAccessRequest[]> => {
+  return sequelize.query<ViewerAccessRequest>(
+    `SELECT
+      var.*,
+      u.email as viewer_email,
+      u.username as viewer_username
+     FROM viewer_access_requests var
+     JOIN users u ON u.id = var.viewer_user_id
+     WHERE u.created_by_user_id = :adminUserId
+     ORDER BY var.created_at DESC`,
+    { replacements: { adminUserId }, type: QueryTypes.SELECT }
+  );
+};
+
+export const decideAccessRequest = async (params: {
+  requestId: string;
+  adminUserId: string;
+  decision: 'approved' | 'denied';
+  reason?: string | null;
+}): Promise<ViewerAccessRequest> => {
+  const transaction = await sequelize.transaction();
+  try {
+    const [request] = await sequelize.query<ViewerAccessRequest>(
+      `SELECT var.*
+       FROM viewer_access_requests var
+       JOIN users u ON u.id = var.viewer_user_id
+       WHERE var.id = :requestId
+         AND u.created_by_user_id = :adminUserId
+       LIMIT 1`,
+      {
+        replacements: { requestId: params.requestId, adminUserId: params.adminUserId },
+        type: QueryTypes.SELECT,
+        transaction,
+      }
+    );
+
+    if (!request) throw new Error('Access request not found or access denied');
+    if (request.status !== 'pending') throw new Error('Access request is not pending');
+
+    if (params.decision === 'approved') {
+      if (request.requested_additional_hours && request.requested_additional_hours > 0) {
+        await extendViewerExpiry(request.viewer_user_id, params.adminUserId, request.requested_additional_hours);
+      }
+
+      if (request.requested_permissions) {
+        const requestedPermissions =
+          typeof request.requested_permissions === 'string'
+            ? (JSON.parse(request.requested_permissions) as ViewerPermission[])
+            : (request.requested_permissions as ViewerPermission[]);
+
+        if (Array.isArray(requestedPermissions) && requestedPermissions.length > 0) {
+          await updateViewerPermissions(request.viewer_user_id, params.adminUserId, requestedPermissions);
+        }
+      }
+    }
+
+    const [updated] = await sequelize.query<ViewerAccessRequest>(
+      `UPDATE viewer_access_requests
+       SET status = :status,
+           decided_by_user_id = :decidedBy,
+           decision_reason = :reason,
+           decided_at = CURRENT_TIMESTAMP
+       WHERE id = :requestId
+       RETURNING *`,
+      {
+        replacements: {
+          status: params.decision,
+          decidedBy: params.adminUserId,
+          reason: params.reason ?? null,
+          requestId: params.requestId,
+        },
+        type: QueryTypes.SELECT,
+        transaction,
+      }
+    );
+
+    await transaction.commit();
+    if (!updated) throw new Error('Failed to update access request');
+    return updated;
+  } catch (error) {
+    await transaction.rollback();
+    throw error;
+  }
 };
 
 /**

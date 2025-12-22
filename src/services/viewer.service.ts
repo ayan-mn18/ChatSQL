@@ -355,6 +355,7 @@ export const extendViewerExpiry = async (
   const [viewer] = await sequelize.query<Viewer>(
     `UPDATE users 
      SET expires_at = COALESCE(expires_at, CURRENT_TIMESTAMP) + interval '1 hour' * :hours,
+         is_active = true,
          updated_at = CURRENT_TIMESTAMP
      WHERE id = :viewerId AND created_by_user_id = :adminUserId AND role = 'viewer'
      RETURNING *`,
@@ -630,6 +631,11 @@ export const deactivateExpiredViewers = async (): Promise<number> => {
   const count = (metadata as any)?.rowCount || 0;
   if (count > 0) {
     logger.info(`✅ [VIEWER] Deactivated ${count} expired viewers`);
+    
+    // NOTE: If we were creating specific DB users for viewers on the target databases,
+    // we would trigger a job here to run REVOKE/DROP USER commands on those databases.
+    // Since we currently use a proxy approach with the connection's main credentials,
+    // deactivating the viewer in our 'users' table is sufficient to block all access.
   }
   return count;
 };

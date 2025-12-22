@@ -11,6 +11,7 @@ import {
   hasUserExceededPendingLimit,
   AIJobResult,
 } from '../queues/ai-operations.queue';
+import { viewerHasConnectionAccess } from '../services/viewer.service';
 
 // ============================================
 // AI CONTROLLER
@@ -30,30 +31,51 @@ export const generateSql = async (req: Request, res: Response): Promise<void> =>
 
     logger.info(`[AI] Generate SQL request from user ${userId}`);
 
-    // Validate input
-    if (!prompt || typeof prompt !== 'string' || prompt.trim().length < 3) {
-      res.status(400).json({
+    // 1. Verify connection exists and user has access
+    let hasAccess = false;
+    const userRole = req.userRole;
+    
+    if (userRole === 'viewer') {
+      hasAccess = await viewerHasConnectionAccess(userId, connectionId);
+      
+      // Check if viewer has AI permission for this connection
+      if (hasAccess) {
+        const permissions = await sequelize.query<{ can_use_ai: boolean }>(
+          `SELECT can_use_ai FROM viewer_permissions 
+           WHERE viewer_user_id = :userId AND connection_id = :connectionId
+           ORDER BY can_use_ai DESC LIMIT 1`,
+          { replacements: { userId, connectionId }, type: QueryTypes.SELECT }
+        );
+        if (!permissions[0]?.can_use_ai) {
+          hasAccess = false;
+        }
+      }
+    } else {
+      const [connectionResult] = await sequelize.query<{ id: string }>(
+        `SELECT id FROM connections WHERE id = :connectionId AND user_id = :userId`,
+        {
+          replacements: { connectionId, userId },
+          type: QueryTypes.SELECT,
+        }
+      );
+      hasAccess = !!connectionResult;
+    }
+
+    if (!hasAccess) {
+      res.status(404).json({
         success: false,
-        error: 'Prompt is required and must be at least 3 characters',
-        code: 'VALIDATION_ERROR',
+        error: 'Connection not found or unauthorized',
+        code: 'CONNECTION_NOT_FOUND',
       });
       return;
     }
 
-    // 1. Verify connection exists and belongs to user
-    const [connectionResult] = await sequelize.query<{ id: string }>(
-      `SELECT id FROM connections WHERE id = :connectionId AND user_id = :userId`,
-      {
-        replacements: { connectionId, userId },
-        type: QueryTypes.SELECT,
-      }
-    );
-
-    if (!connectionResult) {
-      res.status(404).json({
+    // Validate input
+    if (!prompt || typeof prompt !== 'string' || prompt.trim().length < 3) {
+      res.status(400).json({
         success: false,
-        error: 'Connection not found',
-        code: 'CONNECTION_NOT_FOUND',
+        error: 'Prompt is required and must be at least 3 characters long',
+        code: 'VALIDATION_ERROR',
       });
       return;
     }
@@ -152,30 +174,51 @@ export const explainQuery = async (req: Request, res: Response): Promise<void> =
 
     logger.info(`[AI] Explain query request from user ${userId}`);
 
-    // Validate input
-    if (!sql || typeof sql !== 'string' || sql.trim().length < 5) {
-      res.status(400).json({
+    // 1. Verify connection exists and user has access
+    let hasAccess = false;
+    const userRole = req.userRole;
+    
+    if (userRole === 'viewer') {
+      hasAccess = await viewerHasConnectionAccess(userId, connectionId);
+      
+      // Check if viewer has AI permission for this connection
+      if (hasAccess) {
+        const permissions = await sequelize.query<{ can_use_ai: boolean }>(
+          `SELECT can_use_ai FROM viewer_permissions 
+           WHERE viewer_user_id = :userId AND connection_id = :connectionId
+           ORDER BY can_use_ai DESC LIMIT 1`,
+          { replacements: { userId, connectionId }, type: QueryTypes.SELECT }
+        );
+        if (!permissions[0]?.can_use_ai) {
+          hasAccess = false;
+        }
+      }
+    } else {
+      const [connectionResult] = await sequelize.query<{ id: string }>(
+        `SELECT id FROM connections WHERE id = :connectionId AND user_id = :userId`,
+        {
+          replacements: { connectionId, userId },
+          type: QueryTypes.SELECT,
+        }
+      );
+      hasAccess = !!connectionResult;
+    }
+
+    if (!hasAccess) {
+      res.status(404).json({
         success: false,
-        error: 'SQL query is required',
-        code: 'VALIDATION_ERROR',
+        error: 'Connection not found or unauthorized',
+        code: 'CONNECTION_NOT_FOUND',
       });
       return;
     }
 
-    // 1. Verify connection exists and belongs to user
-    const [connectionResult] = await sequelize.query<{ id: string }>(
-      `SELECT id FROM connections WHERE id = :connectionId AND user_id = :userId`,
-      {
-        replacements: { connectionId, userId },
-        type: QueryTypes.SELECT,
-      }
-    );
-
-    if (!connectionResult) {
-      res.status(404).json({
+    // Validate input
+    if (!sql || typeof sql !== 'string' || sql.trim().length < 5) {
+      res.status(400).json({
         success: false,
-        error: 'Connection not found',
-        code: 'CONNECTION_NOT_FOUND',
+        error: 'SQL query is required and must be at least 5 characters long',
+        code: 'VALIDATION_ERROR',
       });
       return;
     }

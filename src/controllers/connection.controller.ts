@@ -40,7 +40,8 @@ import {
 import {
   viewerHasConnectionAccess,
   getViewerAllowedSchemas,
-  getViewerAllowedTables
+  getViewerAllowedTables,
+  checkViewerTablePermission
 } from '../services/viewer.service';
 
 // ============================================
@@ -526,17 +527,37 @@ export const getConnectionById = async (req: Request, res: Response): Promise<vo
 
     logger.info('[CONNECTION] Get connection by ID request', { id, userId });
 
-    const connections = await sequelize.query<ConnectionPublic>(
-      `SELECT id, user_id, name, host, port, type, db_name, username, ssl,
-              is_valid, schema_synced, schema_synced_at, last_tested_at, 
-              created_at, updated_at
-       FROM connections
-       WHERE id = $1 AND user_id = $2`,
-      {
-        bind: [id, userId],
-        type: QueryTypes.SELECT
-      }
-    );
+    let connections: ConnectionPublic[];
+    const userRole = req.userRole;
+
+    if (userRole === 'viewer') {
+      // Viewers only see connections they have permissions for
+      connections = await sequelize.query<ConnectionPublic>(
+        `SELECT DISTINCT c.id, c.user_id, c.name, c.host, c.port, c.type, c.db_name, c.username, c.ssl,
+                c.is_valid, c.schema_synced, c.schema_synced_at, c.last_tested_at, 
+                c.created_at, c.updated_at
+         FROM connections c
+         INNER JOIN viewer_permissions vp ON c.id = vp.connection_id
+         WHERE c.id = $1 AND vp.viewer_user_id = $2`,
+        {
+          bind: [id, userId],
+          type: QueryTypes.SELECT
+        }
+      );
+    } else {
+      // Super admins see their own connections
+      connections = await sequelize.query<ConnectionPublic>(
+        `SELECT id, user_id, name, host, port, type, db_name, username, ssl,
+                is_valid, schema_synced, schema_synced_at, last_tested_at, 
+                created_at, updated_at
+         FROM connections
+         WHERE id = $1 AND user_id = $2`,
+        {
+          bind: [id, userId],
+          type: QueryTypes.SELECT
+        }
+      );
+    }
 
     if (connections.length === 0) {
       res.status(404).json({
@@ -1397,29 +1418,39 @@ export const getRelations = async (req: Request, res: Response): Promise<void> =
   try {
     const { id } = req.params;
     const userId = req.userId;
+    const userRole = req.userRole;
     logger.info(`[CONNECTION] Get ERD relations request for connection: ${id}`);
     
-    // 1. Verify connection exists and belongs to user
-    const [connectionResult] = await sequelize.query<{ id: string }>(
-      `SELECT id FROM connections WHERE id = :id AND user_id = :userId`,
-      {
-        replacements: { id, userId },
-        type: QueryTypes.SELECT
-      }
-    );
+    // 1. Verify connection exists and user has access
+    let hasAccess = false;
     
-    if (!connectionResult) {
+    if (userRole === 'viewer') {
+      hasAccess = await viewerHasConnectionAccess(userId!, id);
+    } else {
+      const [connectionResult] = await sequelize.query<{ id: string }>(
+        `SELECT id FROM connections WHERE id = :id AND user_id = :userId`,
+        {
+          replacements: { id, userId },
+          type: QueryTypes.SELECT
+        }
+      );
+      hasAccess = !!connectionResult;
+    }
+    
+    if (!hasAccess) {
       logger.warn(`[CONNECTION] Connection not found or unauthorized: ${id}`);
       res.status(404).json({
         success: false,
-        error: 'Connection not found',
+        error: 'Connection not found or unauthorized',
         code: 'CONNECTION_NOT_FOUND'
       });
       return;
     }
     
     // 2. Check Redis cache first
-    const cacheKey = `connection:${id}:relations`;
+    const cacheKey = userRole === 'viewer'
+      ? `viewer:${userId}:connection:${id}:relations`
+      : `connection:${id}:relations`;
     const cached = await getFromCache<any[]>(cacheKey);
     
     if (cached) {
@@ -1514,27 +1545,42 @@ export const getTableData = async (req: Request, res: Response): Promise<void> =
     
     logger.info(`[CONNECTION] Get table data request: ${schema}.${table} (page ${page})`);
     
-    // 1. Verify connection exists and belongs to user
-    const [connectionResult] = await sequelize.query<{ id: string }>(
-      `SELECT id FROM connections WHERE id = :id AND user_id = :userId`,
-      {
-        replacements: { id, userId },
-        type: QueryTypes.SELECT
-      }
-    );
+    // 1. Verify connection exists and user has access
+    let hasAccess = false;
+    const userRole = req.userRole;
     
-    if (!connectionResult) {
+    if (userRole === 'viewer') {
+      hasAccess = await viewerHasConnectionAccess(userId!, id);
+      
+      // Check if viewer has select permission for this specific table
+      if (hasAccess) {
+        hasAccess = await checkViewerTablePermission(userId!, id, schema, table, 'select');
+      }
+    } else {
+      const [connectionResult] = await sequelize.query<{ id: string }>(
+        `SELECT id FROM connections WHERE id = :id AND user_id = :userId`,
+        {
+          replacements: { id, userId },
+          type: QueryTypes.SELECT
+        }
+      );
+      hasAccess = !!connectionResult;
+    }
+    
+    if (!hasAccess) {
       logger.warn(`[CONNECTION] Connection not found or unauthorized: ${id}`);
       res.status(404).json({
         success: false,
-        error: 'Connection not found',
+        error: 'Connection not found or unauthorized',
         code: 'CONNECTION_NOT_FOUND'
       });
       return;
     }
     
     // 2. Check cache for this specific query
-    const cacheKey = `connection:${id}:data:${schema}:${table}:p${page}:s${pageSize}:${sortBy || ''}_${sortOrder}:${JSON.stringify(filters)}`;
+    const cacheKey = userRole === 'viewer'
+      ? `viewer:${userId}:connection:${id}:data:${schema}:${table}:p${page}:s${pageSize}:${sortBy || ''}_${sortOrder}:${JSON.stringify(filters)}`
+      : `connection:${id}:data:${schema}:${table}:p${page}:s${pageSize}:${sortBy || ''}_${sortOrder}:${JSON.stringify(filters)}`;
     const cached = await getFromCache<SelectQueryResult>(cacheKey);
     
     if (cached) {
@@ -1636,19 +1682,32 @@ export const updateTableRow = async (req: Request, res: Response): Promise<void>
       return;
     }
     
-    // 1. Verify connection exists and belongs to user
-    const [connectionResult] = await sequelize.query<{ id: string }>(
-      `SELECT id FROM connections WHERE id = :id AND user_id = :userId`,
-      {
-        replacements: { id, userId },
-        type: QueryTypes.SELECT
-      }
-    );
+    // 1. Verify connection exists and user has access
+    let hasAccess = false;
+    const userRole = req.userRole;
     
-    if (!connectionResult) {
+    if (userRole === 'viewer') {
+      hasAccess = await viewerHasConnectionAccess(userId!, id);
+      
+      // Check if viewer has update permission for this specific table
+      if (hasAccess) {
+        hasAccess = await checkViewerTablePermission(userId!, id, schema, table, 'update');
+      }
+    } else {
+      const [connectionResult] = await sequelize.query<{ id: string }>(
+        `SELECT id FROM connections WHERE id = :id AND user_id = :userId`,
+        {
+          replacements: { id, userId },
+          type: QueryTypes.SELECT
+        }
+      );
+      hasAccess = !!connectionResult;
+    }
+    
+    if (!hasAccess) {
       res.status(404).json({
         success: false,
-        error: 'Connection not found',
+        error: 'Connection not found or unauthorized',
         code: 'CONNECTION_NOT_FOUND'
       });
       return;
@@ -1698,30 +1757,43 @@ export const insertTableRow = async (req: Request, res: Response): Promise<void>
     
     logger.info(`[CONNECTION] Insert row request: ${schema}.${table}`);
     
+    // 1. Verify connection exists and user has access
+    let hasAccess = false;
+    const userRole = req.userRole;
+    
+    if (userRole === 'viewer') {
+      hasAccess = await viewerHasConnectionAccess(userId!, id);
+      
+      // Check if viewer has insert permission for this specific table
+      if (hasAccess) {
+        hasAccess = await checkViewerTablePermission(userId!, id, schema, table, 'insert');
+      }
+    } else {
+      const [connectionResult] = await sequelize.query<{ id: string }>(
+        `SELECT id FROM connections WHERE id = :id AND user_id = :userId`,
+        {
+          replacements: { id, userId },
+          type: QueryTypes.SELECT
+        }
+      );
+      hasAccess = !!connectionResult;
+    }
+    
+    if (!hasAccess) {
+      res.status(404).json({
+        success: false,
+        error: 'Connection not found or unauthorized',
+        code: 'CONNECTION_NOT_FOUND'
+      });
+      return;
+    }
+
     // Validate input
     if (!values || typeof values !== 'object' || Object.keys(values).length === 0) {
       res.status(400).json({
         success: false,
         error: 'Values object is required and must not be empty',
         code: 'VALIDATION_ERROR'
-      });
-      return;
-    }
-    
-    // 1. Verify connection exists and belongs to user
-    const [connectionResult] = await sequelize.query<{ id: string }>(
-      `SELECT id FROM connections WHERE id = :id AND user_id = :userId`,
-      {
-        replacements: { id, userId },
-        type: QueryTypes.SELECT
-      }
-    );
-    
-    if (!connectionResult) {
-      res.status(404).json({
-        success: false,
-        error: 'Connection not found',
-        code: 'CONNECTION_NOT_FOUND'
       });
       return;
     }
@@ -1768,30 +1840,43 @@ export const deleteTableRow = async (req: Request, res: Response): Promise<void>
     
     logger.info(`[CONNECTION] Delete row request: ${schema}.${table}/${rowId}`);
     
+    // 1. Verify connection exists and user has access
+    let hasAccess = false;
+    const userRole = req.userRole;
+    
+    if (userRole === 'viewer') {
+      hasAccess = await viewerHasConnectionAccess(userId!, id);
+      
+      // Check if viewer has delete permission for this specific table
+      if (hasAccess) {
+        hasAccess = await checkViewerTablePermission(userId!, id, schema, table, 'delete');
+      }
+    } else {
+      const [connectionResult] = await sequelize.query<{ id: string }>(
+        `SELECT id FROM connections WHERE id = :id AND user_id = :userId`,
+        {
+          replacements: { id, userId },
+          type: QueryTypes.SELECT
+        }
+      );
+      hasAccess = !!connectionResult;
+    }
+    
+    if (!hasAccess) {
+      res.status(404).json({
+        success: false,
+        error: 'Connection not found or unauthorized',
+        code: 'CONNECTION_NOT_FOUND'
+      });
+      return;
+    }
+
     // Validate input
     if (!primaryKeyColumn) {
       res.status(400).json({
         success: false,
         error: 'Primary key column is required',
         code: 'VALIDATION_ERROR'
-      });
-      return;
-    }
-    
-    // 1. Verify connection exists and belongs to user
-    const [connectionResult] = await sequelize.query<{ id: string }>(
-      `SELECT id FROM connections WHERE id = :id AND user_id = :userId`,
-      {
-        replacements: { id, userId },
-        type: QueryTypes.SELECT
-      }
-    );
-    
-    if (!connectionResult) {
-      res.status(404).json({
-        success: false,
-        error: 'Connection not found',
-        code: 'CONNECTION_NOT_FOUND'
       });
       return;
     }
@@ -1840,30 +1925,42 @@ export const executeQuery = async (req: Request, res: Response): Promise<void> =
     
     logger.info(`[CONNECTION] Execute query request for connection: ${id}`);
     
+    // 1. Verify connection exists and user has access
+    let hasAccess = false;
+    const userRole = req.userRole;
+    
+    if (userRole === 'viewer') {
+      hasAccess = await viewerHasConnectionAccess(userId!, id);
+      
+      // For raw SQL, we should be extra careful. 
+      // For now, we'll allow it if they have access to the connection,
+      // but the DB worker will enforce read-only if requested.
+    } else {
+      const [connectionResult] = await sequelize.query<{ id: string }>(
+        `SELECT id FROM connections WHERE id = :id AND user_id = :userId`,
+        {
+          replacements: { id, userId },
+          type: QueryTypes.SELECT
+        }
+      );
+      hasAccess = !!connectionResult;
+    }
+    
+    if (!hasAccess) {
+      res.status(404).json({
+        success: false,
+        error: 'Connection not found or unauthorized',
+        code: 'CONNECTION_NOT_FOUND'
+      });
+      return;
+    }
+
     // Validate input
     if (!query || typeof query !== 'string' || query.trim().length === 0) {
       res.status(400).json({
         success: false,
         error: 'Query is required',
         code: 'VALIDATION_ERROR'
-      });
-      return;
-    }
-    
-    // 1. Verify connection exists and belongs to user
-    const [connectionResult] = await sequelize.query<{ id: string }>(
-      `SELECT id FROM connections WHERE id = :id AND user_id = :userId`,
-      {
-        replacements: { id, userId },
-        type: QueryTypes.SELECT
-      }
-    );
-    
-    if (!connectionResult) {
-      res.status(404).json({
-        success: false,
-        error: 'Connection not found',
-        code: 'CONNECTION_NOT_FOUND'
       });
       return;
     }
@@ -1903,28 +2000,51 @@ export const getConnectionAnalytics = async (req: Request, res: Response): Promi
   try {
     const { id } = req.params;
     const userId = req.userId;
+    const userRole = req.userRole;
     logger.info(`[CONNECTION] Get analytics request for connection: ${id}`);
     
-    // 1. Verify connection exists and belongs to user
-    const [connectionResult] = await sequelize.query<{ id: string }>(
-      `SELECT id FROM connections WHERE id = :id AND user_id = :userId`,
-      {
-        replacements: { id, userId },
-        type: QueryTypes.SELECT
-      }
-    );
+    // 1. Verify connection exists and user has access
+    let hasAccess = false;
     
-    if (!connectionResult) {
+    if (userRole === 'viewer') {
+      hasAccess = await viewerHasConnectionAccess(userId!, id);
+      
+      // Check if viewer has analytics permission for this connection
+      if (hasAccess) {
+        const permissions = await sequelize.query<{ can_view_analytics: boolean }>(
+          `SELECT can_view_analytics FROM viewer_permissions 
+           WHERE viewer_user_id = :userId AND connection_id = :id
+           ORDER BY can_view_analytics DESC LIMIT 1`,
+          { replacements: { userId, id }, type: QueryTypes.SELECT }
+        );
+        if (!permissions[0]?.can_view_analytics) {
+          hasAccess = false;
+        }
+      }
+    } else {
+      const [connectionResult] = await sequelize.query<{ id: string }>(
+        `SELECT id FROM connections WHERE id = :id AND user_id = :userId`,
+        {
+          replacements: { id, userId },
+          type: QueryTypes.SELECT
+        }
+      );
+      hasAccess = !!connectionResult;
+    }
+    
+    if (!hasAccess) {
       res.status(404).json({
         success: false,
-        error: 'Connection not found',
+        error: 'Connection not found or unauthorized',
         code: 'CONNECTION_NOT_FOUND'
       });
       return;
     }
     
     // 2. Check Redis cache first (1 minute TTL for analytics)
-    const cacheKey = `connection:${id}:analytics`;
+    const cacheKey = userRole === 'viewer' 
+      ? `viewer:${userId}:connection:${id}:analytics`
+      : `connection:${id}:analytics`;
     const cached = await getFromCache<any>(cacheKey);
     
     if (cached) {
@@ -2211,22 +2331,35 @@ export const getTableColumns = async (req: Request, res: Response): Promise<void
   try {
     const { id, schema, table } = req.params;
     const userId = req.userId;
+    const userRole = req.userRole;
     
     logger.info(`[CONNECTION] Get table columns request: ${schema}.${table}`);
     
-    // 1. Verify connection exists and belongs to user
-    const [connectionResult] = await sequelize.query<{ id: string }>(
-      `SELECT id FROM connections WHERE id = :id AND user_id = :userId`,
-      {
-        replacements: { id, userId },
-        type: QueryTypes.SELECT
-      }
-    );
+    // 1. Verify connection exists and user has access
+    let hasAccess = false;
     
-    if (!connectionResult) {
+    if (userRole === 'viewer') {
+      hasAccess = await viewerHasConnectionAccess(userId!, id);
+      
+      // Check if viewer has select permission for this specific table
+      if (hasAccess) {
+        hasAccess = await checkViewerTablePermission(userId!, id, schema, table, 'select');
+      }
+    } else {
+      const [connectionResult] = await sequelize.query<{ id: string }>(
+        `SELECT id FROM connections WHERE id = :id AND user_id = :userId`,
+        {
+          replacements: { id, userId },
+          type: QueryTypes.SELECT
+        }
+      );
+      hasAccess = !!connectionResult;
+    }
+    
+    if (!hasAccess) {
       res.status(404).json({
         success: false,
-        error: 'Connection not found',
+        error: 'Connection not found or unauthorized',
         code: 'CONNECTION_NOT_FOUND'
       });
       return;

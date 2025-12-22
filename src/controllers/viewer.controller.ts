@@ -446,9 +446,29 @@ export const resendViewerInvite = async (req: Request, res: Response): Promise<v
     const { hashPassword } = await import('../utils/auth');
     const passwordHash = await hashPassword(newTempPassword);
     
+    // If it's a temporary viewer and already expired, extend it by 24 hours
+    let newExpiresAt = viewer.expires_at;
+    if (viewer.is_temporary && viewer.expires_at && new Date(viewer.expires_at) < new Date()) {
+      newExpiresAt = new Date();
+      newExpiresAt.setHours(newExpiresAt.getHours() + 24);
+    }
+
     await sequelize.query(
-      `UPDATE users SET password_hash = :passwordHash, must_change_password = true WHERE id = :viewerId`,
-      { replacements: { passwordHash, viewerId }, type: QueryTypes.UPDATE }
+      `UPDATE users 
+       SET password_hash = :passwordHash, 
+           must_change_password = true, 
+           is_active = true,
+           expires_at = :expiresAt,
+           updated_at = CURRENT_TIMESTAMP 
+       WHERE id = :viewerId`,
+      { 
+        replacements: { 
+          passwordHash, 
+          viewerId, 
+          expiresAt: newExpiresAt 
+        }, 
+        type: QueryTypes.UPDATE 
+      }
     );
 
     // Get admin info
@@ -460,7 +480,7 @@ export const resendViewerInvite = async (req: Request, res: Response): Promise<v
       viewer.email,
       newTempPassword,
       adminName,
-      viewer.expires_at || undefined
+      newExpiresAt || undefined
     );
 
     res.status(200).json({

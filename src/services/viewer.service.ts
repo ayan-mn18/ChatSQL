@@ -26,6 +26,7 @@ export interface CreateViewerRequest {
   username?: string;
   isTemporary: boolean;
   expiresInHours?: number;  // For temporary viewers
+  mustChangePassword?: boolean;
   permissions: ViewerPermission[];
 }
 
@@ -156,10 +157,10 @@ export const createViewer = async (
         :username, 
         'viewer', 
         :is_temporary, 
-        :expires_at,
+        :expires_at, 
+        true, 
         true,
-        true,
-        true,
+        :must_change_password,
         :created_by_user_id
       ) RETURNING *`,
       {
@@ -169,6 +170,7 @@ export const createViewer = async (
           username: request.username || null,
           is_temporary: request.isTemporary,
           expires_at: expiresAt,
+          must_change_password: request.mustChangePassword ?? true,
           created_by_user_id: createdByUserId
         },
         type: QueryTypes.SELECT,

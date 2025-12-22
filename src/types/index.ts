@@ -11,8 +11,13 @@ export interface User {
   password_hash: string;
   username: string | null;
   profile_url: string | null;
+  role: 'super_admin' | 'viewer';
   is_verified: boolean;
   is_active: boolean;
+  is_temporary: boolean;
+  expires_at: Date | null;
+  must_change_password: boolean;
+  created_by_user_id: string | null;
   last_login_at: Date | null;
   created_at: Date;
   updated_at: Date;
@@ -23,7 +28,11 @@ export interface UserPublic {
   email: string;
   username: string | null;
   profile_url: string | null;
+  role: 'super_admin' | 'viewer';
   is_verified: boolean;
+  is_temporary: boolean;
+  expires_at: Date | null;
+  must_change_password: boolean;
   created_at: Date;
 }
 

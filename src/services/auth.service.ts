@@ -132,7 +132,7 @@ export const updatePassword = async (userId: string, newPassword: string): Promi
   const password_hash = await hashPassword(newPassword);
   
   await sequelize.query(
-    `UPDATE users SET password_hash = :password_hash WHERE id = :userId`,
+    `UPDATE users SET password_hash = :password_hash, must_change_password = false WHERE id = :userId`,
     {
       replacements: { userId, password_hash },
       type: QueryTypes.UPDATE
@@ -353,7 +353,11 @@ export const toPublicUser = (user: User): UserPublic => ({
   email: user.email,
   username: user.username,
   profile_url: user.profile_url,
+  role: user.role,
   is_verified: user.is_verified,
+  is_temporary: user.is_temporary,
+  expires_at: user.expires_at,
+  must_change_password: user.must_change_password,
   created_at: user.created_at
 });
 

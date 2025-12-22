@@ -18,7 +18,7 @@ export const createViewer = async (req: Request, res: Response): Promise<void> =
       return;
     }
 
-    const { email, username, isTemporary, expiresInHours, permissions, sendEmail } = req.body;
+    const { email, username, isTemporary, expiresInHours, mustChangePassword, permissions, sendEmail } = req.body;
 
     // Validate required fields
     if (!email || !permissions || !Array.isArray(permissions) || permissions.length === 0) {
@@ -45,6 +45,7 @@ export const createViewer = async (req: Request, res: Response): Promise<void> =
       username,
       isTemporary: isTemporary || false,
       expiresInHours: expiresInHours || undefined,
+      mustChangePassword: mustChangePassword ?? true,
       permissions
     });
 
@@ -58,7 +59,8 @@ export const createViewer = async (req: Request, res: Response): Promise<void> =
         email,
         tempPassword,
         adminName,
-        viewer.expires_at || undefined
+        viewer.expires_at || undefined,
+        mustChangePassword ?? true
       );
     }
 

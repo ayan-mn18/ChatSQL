@@ -141,11 +141,12 @@ export const sendViewerInvitationEmail = async (
   email: string,
   tempPassword: string,
   invitedByName: string,
-  expiresAt?: Date
+  expiresAt?: Date,
+  mustChangePassword: boolean = true
 ): Promise<boolean> => {
   try {
     const transport = getTransporter();
-    const template = emailTemplates.viewerInvitation(email, tempPassword, invitedByName, expiresAt);
+    const template = emailTemplates.viewerInvitation(email, tempPassword, invitedByName, expiresAt, mustChangePassword);
     
     await transport.sendMail({
       from: `"${SMTP_FROM_NAME}" <${SMTP_FROM_EMAIL}>`,
@@ -241,7 +242,7 @@ export const emailTemplates = {
     text: `Welcome to ChatSQL${username ? `, ${username}` : ''}! Your email has been verified and your account is now active.`
   }),
 
-  viewerInvitation: (email: string, tempPassword: string, invitedBy: string, expiresAt?: Date) => ({
+  viewerInvitation: (email: string, tempPassword: string, invitedBy: string, expiresAt?: Date, mustChangePassword: boolean = true) => ({
     subject: 'You have been invited to ChatSQL! 🗄️',
     html: `
       <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
@@ -265,7 +266,7 @@ export const emailTemplates = {
         </div>
         ` : ''}
         
-        <p>You'll be asked to change your password on first login.</p>
+        ${mustChangePassword ? '<p>You\'ll be asked to change your password on first login.</p>' : ''}
         
         <div style="text-align: center; margin: 30px 0;">
           <a href="${process.env.FRONTEND_URL || 'http://localhost:5173'}/login" style="background: #6366f1; color: white; padding: 14px 35px; text-decoration: none; border-radius: 8px; font-weight: bold; display: inline-block;">Login to ChatSQL</a>
@@ -276,6 +277,6 @@ export const emailTemplates = {
         <p style="color: #999; font-size: 12px;">© ${new Date().getFullYear()} ChatSQL. All rights reserved.</p>
       </div>
     `,
-    text: `You've been invited to ChatSQL by ${invitedBy}!\n\nYour login credentials:\nEmail: ${email}\nTemporary Password: ${tempPassword}\n\n${expiresAt ? `Note: Your access will expire on ${expiresAt.toLocaleDateString()} at ${expiresAt.toLocaleTimeString()}\n\n` : ''}Login at: ${process.env.FRONTEND_URL || 'http://localhost:5173'}/login\n\nYou'll be asked to change your password on first login.`
+    text: `You've been invited to ChatSQL by ${invitedBy}!\n\nYour login credentials:\nEmail: ${email}\nTemporary Password: ${tempPassword}\n\n${expiresAt ? `Note: Your access will expire on ${expiresAt.toLocaleDateString()} at ${expiresAt.toLocaleTimeString()}\n\n` : ''}Login at: ${process.env.FRONTEND_URL || 'http://localhost:5173'}/login\n\n${mustChangePassword ? 'You\'ll be asked to change your password on first login.' : ''}`
   })
 };

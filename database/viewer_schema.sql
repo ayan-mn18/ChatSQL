@@ -84,10 +84,59 @@ CREATE TABLE IF NOT EXISTS viewer_permissions (
     can_export BOOLEAN DEFAULT TRUE,                   -- Can export query results
     
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    
-    -- Unique permission per viewer + connection + schema + table combination
-    CONSTRAINT unique_viewer_permission UNIQUE (viewer_user_id, connection_id, schema_name, table_name)
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+-- NOTE: We do NOT use a plain UNIQUE constraint on (viewer_user_id, connection_id, schema_name, table_name)
+-- because in PostgreSQL UNIQUE treats NULL values as distinct. That would allow multiple rows where
+-- schema_name/table_name are NULL (meaning "all") for the same viewer+connection.
+
+-- Drop legacy constraint if it exists (older versions of this file used it)
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conname = 'unique_viewer_permission'
+          AND conrelid = 'viewer_permissions'::regclass
+    ) THEN
+        ALTER TABLE viewer_permissions DROP CONSTRAINT unique_viewer_permission;
+    END IF;
+END $$;
+
+-- Best-effort de-dupe before adding the unique index (keep most recently updated/created)
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'viewer_permissions') THEN
+        WITH ranked AS (
+            SELECT
+                ctid,
+                ROW_NUMBER() OVER (
+                    PARTITION BY
+                        viewer_user_id,
+                        connection_id,
+                        COALESCE(schema_name, '__ALL__'),
+                        COALESCE(table_name, '__ALL__')
+                    ORDER BY
+                        updated_at DESC NULLS LAST,
+                        created_at DESC NULLS LAST
+                ) AS rn
+            FROM viewer_permissions
+        )
+        DELETE FROM viewer_permissions vp
+        USING ranked r
+        WHERE vp.ctid = r.ctid
+          AND r.rn > 1;
+    END IF;
+END $$;
+
+-- Null-safe uniqueness across scope (schema/table)
+CREATE UNIQUE INDEX IF NOT EXISTS uq_viewer_permissions_scope
+ON viewer_permissions (
+    viewer_user_id,
+    connection_id,
+    COALESCE(schema_name, '__ALL__'),
+    COALESCE(table_name, '__ALL__')
 );
 
 -- Indexes for viewer_permissions
@@ -168,6 +217,7 @@ CREATE TABLE IF NOT EXISTS viewer_access_requests (
 CREATE INDEX IF NOT EXISTS idx_viewer_access_requests_viewer ON viewer_access_requests(viewer_user_id);
 CREATE INDEX IF NOT EXISTS idx_viewer_access_requests_status ON viewer_access_requests(status);
 CREATE INDEX IF NOT EXISTS idx_viewer_access_requests_created ON viewer_access_requests(created_at);
+CREATE INDEX IF NOT EXISTS idx_viewer_access_requests_scope ON viewer_access_requests(connection_id, schema_name, table_name);
 
 -- ============================================
 -- HELPER FUNCTION: Check if user has permission on table

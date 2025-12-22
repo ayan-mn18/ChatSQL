@@ -100,6 +100,115 @@ export const createViewer = async (req: Request, res: Response): Promise<void> =
 };
 
 /**
+ * Check whether email/username can be used for a new viewer, or maps to an existing viewer.
+ * POST /api/viewers/identity-check
+ */
+export const checkViewerIdentity = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const adminUserId = req.userId;
+    if (!adminUserId) {
+      res.status(401).json({ success: false, error: 'Unauthorized' });
+      return;
+    }
+
+    const isAdmin = await viewerService.isSuperAdmin(adminUserId);
+    if (!isAdmin) {
+      res.status(403).json({ success: false, error: 'Only super admins can manage viewers' });
+      return;
+    }
+
+    const { email, username } = req.body as { email?: string; username?: string };
+    const result = await viewerService.checkViewerIdentity(adminUserId, email || '', username);
+    res.status(200).json({ success: true, data: result });
+  } catch (error: any) {
+    logger.error('❌ [VIEWER] Identity check error:', error);
+    res.status(500).json({ success: false, error: 'Failed to check identity' });
+  }
+};
+
+/**
+ * Create a new viewer or add access to an existing viewer (by email)
+ * POST /api/viewers/upsert
+ */
+export const upsertViewer = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const adminUserId = req.userId;
+    if (!adminUserId) {
+      res.status(401).json({ success: false, error: 'Unauthorized' });
+      return;
+    }
+
+    const isAdmin = await viewerService.isSuperAdmin(adminUserId);
+    if (!isAdmin) {
+      res.status(403).json({ success: false, error: 'Only super admins can manage viewers' });
+      return;
+    }
+
+    const { email, username, isTemporary, expiresInHours, mustChangePassword, permissions, sendEmail } = req.body;
+
+    if (!email || !permissions || !Array.isArray(permissions) || permissions.length === 0) {
+      res.status(400).json({ success: false, error: 'Email and at least one permission are required' });
+      return;
+    }
+
+    const result = await viewerService.upsertViewerByEmail(adminUserId, {
+      email,
+      username,
+      isTemporary: !!isTemporary,
+      expiresInHours: isTemporary ? (expiresInHours || undefined) : undefined,
+      mustChangePassword,
+      permissions
+    });
+
+    // Send invitation email only when a brand-new viewer is created
+    if (result.created && sendEmail !== false && result.tempPassword) {
+      const admin = await authService.findById(adminUserId);
+      const adminName = admin?.username || admin?.email || 'An administrator';
+      await emailService.sendViewerInvitationEmail(
+        result.viewer.email,
+        result.tempPassword,
+        adminName,
+        result.viewer.expires_at || undefined,
+        mustChangePassword ?? true
+      );
+    }
+
+    res.status(200).json({
+      success: true,
+      message: result.created ? 'Viewer created successfully' : 'Viewer access updated successfully',
+      data: {
+        created: result.created,
+        viewer: {
+          id: result.viewer.id,
+          email: result.viewer.email,
+          username: result.viewer.username,
+          isTemporary: result.viewer.is_temporary,
+          expiresAt: result.viewer.expires_at,
+          isActive: result.viewer.is_active,
+          mustChangePassword: result.viewer.must_change_password,
+          createdAt: result.viewer.created_at
+        },
+        credentials: result.created && result.tempPassword
+          ? { email: result.viewer.email, tempPassword: result.tempPassword }
+          : undefined
+      }
+    });
+  } catch (error: any) {
+    logger.error('❌ [VIEWER] Upsert viewer error:', error);
+    const msg = error?.message || 'Failed to upsert viewer';
+    if (msg.includes('already exists') || msg.includes('Username')) {
+      res.status(409).json({ success: false, error: msg });
+      return;
+    }
+    if (msg.includes('managed by another admin') || msg.includes('Only super admins')) {
+      res.status(403).json({ success: false, error: msg });
+      return;
+    }
+    res.status(500).json({ success: false, error: 'Failed to upsert viewer' });
+  }
+};
+
+/**
  * Get all viewers created by the current admin
  * GET /api/viewers
  */
@@ -559,9 +668,10 @@ export const getCurrentUserRole = async (req: Request, res: Response): Promise<v
         connection_name: string;
         can_view_analytics: boolean;
         can_use_ai: boolean;
+        can_export: boolean;
       }>(
         `SELECT DISTINCT vp.connection_id, c.name as connection_name, 
-                vp.can_view_analytics, vp.can_use_ai
+                vp.can_view_analytics, vp.can_use_ai, vp.can_export
          FROM viewer_permissions vp
          JOIN connections c ON vp.connection_id = c.id
          WHERE vp.viewer_user_id = :userId`,
@@ -571,7 +681,8 @@ export const getCurrentUserRole = async (req: Request, res: Response): Promise<v
       permissionsSummary = {
         connectionCount: permissions.length,
         canViewAnalytics: permissions.some(p => p.can_view_analytics),
-        canUseAi: permissions.some(p => p.can_use_ai)
+        canUseAi: permissions.some(p => p.can_use_ai),
+        canExport: permissions.some(p => p.can_export)
       };
     }
 

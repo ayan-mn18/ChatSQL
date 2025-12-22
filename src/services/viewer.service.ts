@@ -119,6 +119,289 @@ export const emailExists = async (email: string): Promise<boolean> => {
   return parseInt(result[0]?.count || '0') > 0;
 };
 
+/**
+ * Check if username already exists
+ */
+export const usernameExists = async (username: string): Promise<boolean> => {
+  const result = await sequelize.query<{ count: string }>(
+    `SELECT COUNT(*) as count FROM users WHERE username = :username`,
+    { replacements: { username }, type: QueryTypes.SELECT }
+  );
+  return parseInt(result[0]?.count || '0') > 0;
+};
+
+export type ViewerIdentityAction = 'create_new' | 'use_existing_viewer' | 'blocked';
+
+export interface ViewerIdentityCheckResult {
+  action: ViewerIdentityAction;
+  reason?: string;
+  existingUser?: {
+    id: string;
+    email: string;
+    username: string | null;
+    role: string;
+    created_by_user_id: string | null;
+  };
+}
+
+export const checkViewerIdentity = async (
+  adminUserId: string,
+  email: string,
+  username?: string
+): Promise<ViewerIdentityCheckResult> => {
+  const isAdmin = await isSuperAdmin(adminUserId);
+  if (!isAdmin) {
+    return { action: 'blocked', reason: 'Only super admins can manage viewers' };
+  }
+
+  const normalizedEmail = (email || '').trim().toLowerCase();
+  const normalizedUsername = (username || '').trim();
+
+  if (!normalizedEmail) {
+    return { action: 'blocked', reason: 'Email is required' };
+  }
+
+  const [byEmail] = await sequelize.query<{
+    id: string;
+    email: string;
+    username: string | null;
+    role: string;
+    created_by_user_id: string | null;
+  }>(
+    `SELECT id, email, username, role, created_by_user_id
+     FROM users
+     WHERE email = :email
+     LIMIT 1`,
+    { replacements: { email: normalizedEmail }, type: QueryTypes.SELECT }
+  );
+
+  if (byEmail) {
+    if (byEmail.role !== 'viewer') {
+      return {
+        action: 'blocked',
+        reason: 'A user with this email already exists and is not a viewer',
+        existingUser: byEmail
+      };
+    }
+    if (byEmail.created_by_user_id !== adminUserId) {
+      return {
+        action: 'blocked',
+        reason: 'A viewer with this email exists but is managed by another admin',
+        existingUser: byEmail
+      };
+    }
+    return { action: 'use_existing_viewer', existingUser: byEmail };
+  }
+
+  if (normalizedUsername) {
+    const [byUsername] = await sequelize.query<{ id: string }>(
+      `SELECT id FROM users WHERE username = :username LIMIT 1`,
+      { replacements: { username: normalizedUsername }, type: QueryTypes.SELECT }
+    );
+    if (byUsername) {
+      return { action: 'blocked', reason: 'Username is already taken' };
+    }
+  }
+
+  return { action: 'create_new' };
+};
+
+export interface UpsertViewerRequest {
+  email: string;
+  username?: string;
+  isTemporary: boolean;
+  expiresInHours?: number;
+  mustChangePassword?: boolean;
+  permissions: ViewerPermission[];
+}
+
+export const upsertViewerByEmail = async (
+  adminUserId: string,
+  request: UpsertViewerRequest
+): Promise<{ viewer: Viewer; created: boolean; tempPassword?: string }> => {
+  const transaction = await sequelize.transaction();
+  try {
+    const isAdmin = await isSuperAdmin(adminUserId);
+    if (!isAdmin) {
+      throw new Error('Only super admins can manage viewers');
+    }
+
+    const email = (request.email || '').trim().toLowerCase();
+    const username = (request.username || '').trim();
+
+    if (!email) {
+      throw new Error('Email is required');
+    }
+    if (!request.permissions || !Array.isArray(request.permissions) || request.permissions.length === 0) {
+      throw new Error('At least one permission is required');
+    }
+
+    const [existing] = await sequelize.query<Viewer>(
+      `SELECT * FROM users WHERE email = :email LIMIT 1`,
+      { replacements: { email }, type: QueryTypes.SELECT, transaction }
+    );
+
+    if (!existing) {
+      // Creating new viewer
+      if (username) {
+        const [taken] = await sequelize.query<{ id: string }>(
+          `SELECT id FROM users WHERE username = :username LIMIT 1`,
+          { replacements: { username }, type: QueryTypes.SELECT, transaction }
+        );
+        if (taken) {
+          throw new Error('Username is already taken');
+        }
+      }
+
+      await transaction.rollback();
+      // Create uses its own transaction; keep behavior consistent with existing endpoint.
+      const { viewer, tempPassword } = await createViewer(adminUserId, {
+        email,
+        username: username || undefined,
+        isTemporary: request.isTemporary,
+        expiresInHours: request.expiresInHours,
+        mustChangePassword: request.mustChangePassword,
+        permissions: request.permissions
+      });
+      return { viewer, created: true, tempPassword };
+    }
+
+    // Existing user
+    if (existing.role !== 'viewer') {
+      throw new Error('A user with this email already exists and is not a viewer');
+    }
+    if (existing.created_by_user_id !== adminUserId) {
+      throw new Error('A viewer with this email exists but is managed by another admin');
+    }
+
+    // Username update (optional)
+    if (username && username !== existing.username) {
+      const [taken] = await sequelize.query<{ id: string }>(
+        `SELECT id FROM users WHERE username = :username AND id <> :viewerId LIMIT 1`,
+        { replacements: { username, viewerId: existing.id }, type: QueryTypes.SELECT, transaction }
+      );
+      if (taken) {
+        throw new Error('Username is already taken');
+      }
+      await sequelize.query(
+        `UPDATE users SET username = :username, updated_at = CURRENT_TIMESTAMP WHERE id = :viewerId`,
+        { replacements: { username, viewerId: existing.id }, type: QueryTypes.UPDATE, transaction }
+      );
+    }
+
+    // Update settings
+    let expiresAt: Date | null = null;
+    if (request.isTemporary) {
+      if (request.expiresInHours && request.expiresInHours > 0) {
+        expiresAt = new Date();
+        expiresAt.setHours(expiresAt.getHours() + request.expiresInHours);
+      } else {
+        // keep existing expiry if not provided
+        expiresAt = existing.expires_at;
+      }
+    }
+
+    await sequelize.query(
+      `UPDATE users
+       SET is_temporary = :isTemporary,
+           expires_at = :expiresAt,
+           must_change_password = :mustChangePassword,
+           is_active = true,
+           updated_at = CURRENT_TIMESTAMP
+       WHERE id = :viewerId`,
+      {
+        replacements: {
+          isTemporary: request.isTemporary,
+          expiresAt,
+          mustChangePassword: request.mustChangePassword ?? existing.must_change_password,
+          viewerId: existing.id
+        },
+        type: QueryTypes.UPDATE,
+        transaction
+      }
+    );
+
+    // Upsert permissions (null-safe)
+    for (const perm of request.permissions) {
+      await sequelize.query(
+        `DELETE FROM viewer_permissions
+         WHERE viewer_user_id = :viewerUserId
+           AND connection_id = :connectionId
+           AND schema_name IS NOT DISTINCT FROM :schemaName
+           AND table_name IS NOT DISTINCT FROM :tableName`,
+        {
+          replacements: {
+            viewerUserId: existing.id,
+            connectionId: perm.connectionId,
+            schemaName: perm.schemaName,
+            tableName: perm.tableName
+          },
+          type: QueryTypes.DELETE,
+          transaction
+        }
+      );
+
+      await sequelize.query(
+        `INSERT INTO viewer_permissions (
+          viewer_user_id,
+          connection_id,
+          schema_name,
+          table_name,
+          can_select,
+          can_insert,
+          can_update,
+          can_delete,
+          can_use_ai,
+          can_view_analytics,
+          can_export
+        ) VALUES (
+          :viewer_user_id,
+          :connection_id,
+          :schema_name,
+          :table_name,
+          :can_select,
+          :can_insert,
+          :can_update,
+          :can_delete,
+          :can_use_ai,
+          :can_view_analytics,
+          :can_export
+        )`,
+        {
+          replacements: {
+            viewer_user_id: existing.id,
+            connection_id: perm.connectionId,
+            schema_name: perm.schemaName,
+            table_name: perm.tableName,
+            can_select: perm.canSelect,
+            can_insert: perm.canInsert,
+            can_update: perm.canUpdate,
+            can_delete: perm.canDelete,
+            can_use_ai: perm.canUseAi,
+            can_view_analytics: perm.canViewAnalytics,
+            can_export: perm.canExport
+          },
+          type: QueryTypes.INSERT,
+          transaction
+        }
+      );
+    }
+
+    const [updated] = await sequelize.query<Viewer>(
+      `SELECT * FROM users WHERE id = :viewerId LIMIT 1`,
+      { replacements: { viewerId: existing.id }, type: QueryTypes.SELECT, transaction }
+    );
+
+    await transaction.commit();
+    logger.info(`✅ [VIEWER] Upserted viewer access for ${email} by admin ${adminUserId}`);
+    return { viewer: updated || existing, created: false };
+  } catch (error) {
+    await transaction.rollback();
+    logger.error(`❌ [VIEWER] Failed to upsert viewer access:`, error);
+    throw error;
+  }
+};
+
 // ============================================
 // VIEWER MANAGEMENT
 // ============================================

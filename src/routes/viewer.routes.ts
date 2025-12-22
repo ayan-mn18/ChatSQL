@@ -47,6 +47,20 @@ router.post('/access-requests/:requestId/approve', authenticate, viewerControlle
 router.post('/access-requests/:requestId/deny', authenticate, viewerController.denyAccessRequest);
 
 /**
+ * @route   POST /api/viewers/identity-check
+ * @desc    Check if email/username should create new viewer or add access to existing
+ * @access  Private (Super Admin only)
+ */
+router.post('/identity-check', authenticate, viewerController.checkViewerIdentity);
+
+/**
+ * @route   POST /api/viewers/upsert
+ * @desc    Create viewer or add access to existing viewer (by email)
+ * @access  Private (Super Admin only)
+ */
+router.post('/upsert', authenticate, viewerController.upsertViewer);
+
+/**
  * @route   POST /api/viewers
  * @desc    Create a new viewer
  * @access  Private (Super Admin only)

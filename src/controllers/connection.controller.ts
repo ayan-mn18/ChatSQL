@@ -1895,6 +1895,93 @@ export const deleteTableRow = async (req: Request, res: Response): Promise<void>
 };
 
 /**
+ * Detect the type of SQL query
+ */
+function detectQueryType(query: string): 'SELECT' | 'INSERT' | 'UPDATE' | 'DELETE' | 'DDL' | 'OTHER' {
+  const normalized = query.trim().toUpperCase();
+  
+  if (normalized.startsWith('SELECT') || normalized.startsWith('WITH')) {
+    return 'SELECT';
+  }
+  if (normalized.startsWith('INSERT')) {
+    return 'INSERT';
+  }
+  if (normalized.startsWith('UPDATE')) {
+    return 'UPDATE';
+  }
+  if (normalized.startsWith('DELETE')) {
+    return 'DELETE';
+  }
+  if (
+    normalized.startsWith('CREATE') ||
+    normalized.startsWith('ALTER') ||
+    normalized.startsWith('DROP') ||
+    normalized.startsWith('TRUNCATE') ||
+    normalized.startsWith('GRANT') ||
+    normalized.startsWith('REVOKE')
+  ) {
+    return 'DDL';
+  }
+  return 'OTHER';
+}
+
+/**
+ * Check if viewer has permission to execute query type
+ */
+async function checkViewerQueryPermission(
+  userId: string,
+  connectionId: string,
+  queryType: 'SELECT' | 'INSERT' | 'UPDATE' | 'DELETE' | 'DDL' | 'OTHER'
+): Promise<{ allowed: boolean; reason?: string }> {
+  const permissions = await sequelize.query<{
+    can_read: boolean;
+    can_create: boolean;
+    can_update: boolean;
+    can_delete: boolean;
+  }>(
+    `SELECT can_read, can_create, can_update, can_delete 
+     FROM viewer_permissions 
+     WHERE viewer_user_id = :userId AND connection_id = :connectionId
+     LIMIT 1`,
+    {
+      replacements: { userId, connectionId },
+      type: QueryTypes.SELECT
+    }
+  );
+
+  if (!permissions[0]) {
+    return { allowed: false, reason: 'No permissions found for this connection' };
+  }
+
+  const perm = permissions[0];
+
+  switch (queryType) {
+    case 'SELECT':
+      return perm.can_read 
+        ? { allowed: true } 
+        : { allowed: false, reason: 'You do not have permission to run SELECT queries' };
+    case 'INSERT':
+      return perm.can_create 
+        ? { allowed: true } 
+        : { allowed: false, reason: 'You do not have permission to run INSERT queries' };
+    case 'UPDATE':
+      return perm.can_update 
+        ? { allowed: true } 
+        : { allowed: false, reason: 'You do not have permission to run UPDATE queries' };
+    case 'DELETE':
+      return perm.can_delete 
+        ? { allowed: true } 
+        : { allowed: false, reason: 'You do not have permission to run DELETE queries' };
+    case 'DDL':
+      return { allowed: false, reason: 'DDL operations (CREATE, ALTER, DROP, etc.) are not allowed for viewers' };
+    case 'OTHER':
+      return { allowed: false, reason: 'This type of query is not allowed for viewers' };
+    default:
+      return { allowed: false, reason: 'Unknown query type' };
+  }
+}
+
+/**
  * Execute a raw SQL query (read-only by default)
  * POST /api/connections/:id/query
  * 
@@ -1906,9 +1993,22 @@ export const executeQuery = async (req: Request, res: Response): Promise<void> =
   try {
     const { id } = req.params;
     const userId = req.userId;
-    const { query, readOnly = true } = req.body;
+    const { query, readOnly = true, savedQueryId, chatMessageId } = req.body;
     
     logger.info(`[CONNECTION] Execute query request for connection: ${id}`);
+
+    // Validate input first
+    if (!query || typeof query !== 'string' || query.trim().length === 0) {
+      res.status(400).json({
+        success: false,
+        error: 'Query is required',
+        code: 'VALIDATION_ERROR'
+      });
+      return;
+    }
+
+    // Detect query type for permission checking
+    const queryType = detectQueryType(query.trim());
     
     // 1. Verify connection exists and user has access
     let hasAccess = false;
@@ -1917,9 +2017,19 @@ export const executeQuery = async (req: Request, res: Response): Promise<void> =
     if (userRole === 'viewer') {
       hasAccess = await viewerHasConnectionAccess(userId!, id);
       
-      // For raw SQL, we should be extra careful. 
-      // For now, we'll allow it if they have access to the connection,
-      // but the DB worker will enforce read-only if requested.
+      // Check specific permission for this query type
+      if (hasAccess) {
+        const permCheck = await checkViewerQueryPermission(userId!, id, queryType);
+        if (!permCheck.allowed) {
+          res.status(403).json({
+            success: false,
+            error: permCheck.reason,
+            code: 'PERMISSION_DENIED',
+            queryType
+          });
+          return;
+        }
+      }
     } else {
       const [connectionResult] = await sequelize.query<{ id: string }>(
         `SELECT id FROM connections WHERE id = :id AND user_id = :userId`,
@@ -1940,35 +2050,62 @@ export const executeQuery = async (req: Request, res: Response): Promise<void> =
       return;
     }
 
-    // Validate input
-    if (!query || typeof query !== 'string' || query.trim().length === 0) {
-      res.status(400).json({
-        success: false,
-        error: 'Query is required',
-        code: 'VALIDATION_ERROR'
-      });
-      return;
-    }
+    // For viewers, enforce read-only for SELECT queries, allow mutation for permitted types
+    const enforceReadOnly = userRole === 'viewer' 
+      ? queryType === 'SELECT'
+      : readOnly;
     
     // 2. Add job to queue and wait for result
     const job = await addExecuteRawSQLJob({
       connectionId: id,
       userId: userId!,
       query: query.trim(),
-      readOnly: !!readOnly,
+      readOnly: enforceReadOnly,
     });
     
     // Wait for job result (longer timeout for complex queries)
     const result = await waitForJobResult<any>(job, 60000);
+
+    // 3. Save to query history
+    const { saveQuery } = await import('../service/query-history.service');
+    await saveQuery({
+      connectionId: id,
+      userId: userId!,
+      sqlQuery: query.trim(),
+      executionTimeMs: result.executionTime,
+      rowCount: result.rowCount,
+      success: true,
+    });
     
-    logger.info(`[CONNECTION] Executed query, returned ${result.rowCount} rows in ${result.executionTime}ms`);
+    logger.info(`[CONNECTION] Executed query (${queryType}), returned ${result.rowCount} rows in ${result.executionTime}ms`);
     res.json({
       success: true,
       ...result,
+      queryType,
       jobId: job.id
     });
   } catch (error: any) {
     logger.error('[CONNECTION] Execute query failed:', error);
+
+    // Try to save failed query to history
+    try {
+      const { id } = req.params;
+      const userId = req.userId;
+      const { query } = req.body;
+      if (query && userId) {
+        const { saveQuery } = await import('../service/query-history.service');
+        await saveQuery({
+          connectionId: id,
+          userId: userId!,
+          sqlQuery: query.trim(),
+          success: false,
+          errorMessage: error.message,
+        });
+      }
+    } catch (historyError) {
+      // Ignore history save errors
+    }
+
     res.status(500).json({
       success: false,
       error: error.message || 'Failed to execute query',
@@ -2389,6 +2526,92 @@ export const getTableColumns = async (req: Request, res: Response): Promise<void
       success: false,
       error: error.message || 'Failed to get table columns',
       code: 'TABLE_COLUMNS_ERROR'
+    });
+  }
+};
+
+/**
+ * Get full schema metadata for SQL editor autocomplete
+ * Returns all tables and columns for the selected schemas
+ */
+export const getSchemaMetadata = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const { id } = req.params;
+    const userId = req.userId;
+    const userRole = req.userRole;
+    
+    logger.info(`[CONNECTION] Get schema metadata request for connection: ${id}`);
+    
+    // 1. Verify connection exists and user has access
+    let hasAccess = false;
+    
+    if (userRole === 'viewer') {
+      hasAccess = await viewerHasConnectionAccess(userId!, id);
+    } else {
+      const [connectionResult] = await sequelize.query<{ id: string }>(
+        `SELECT id FROM connections WHERE id = :id AND user_id = :userId`,
+        {
+          replacements: { id, userId },
+          type: QueryTypes.SELECT
+        }
+      );
+      hasAccess = !!connectionResult;
+    }
+    
+    if (!hasAccess) {
+      res.status(404).json({
+        success: false,
+        error: 'Connection not found or unauthorized',
+        code: 'CONNECTION_NOT_FOUND'
+      });
+      return;
+    }
+    
+    // 2. Get all tables with columns from selected schemas
+    const tables = await sequelize.query<{
+      schema_name: string;
+      table_name: string;
+      columns: any;
+    }>(
+      `SELECT 
+         ds.schema_name,
+         ts.table_name,
+         ts.columns
+       FROM table_schemas ts
+       JOIN database_schemas ds ON ts.database_schema_id = ds.id
+       WHERE ds.connection_id = :connectionId 
+         AND ds.is_selected = true
+       ORDER BY ds.schema_name, ts.table_name`,
+      {
+        replacements: { connectionId: id },
+        type: QueryTypes.SELECT
+      }
+    );
+    
+    // 3. Transform into the format needed for autocomplete
+    const formattedTables = tables.map(table => ({
+      schema: table.schema_name,
+      name: table.table_name,
+      columns: Array.isArray(table.columns) 
+        ? table.columns.map((col: any) => ({
+            name: col.column_name || col.name,
+            type: col.data_type || col.type || 'unknown'
+          }))
+        : []
+    }));
+    
+    res.json({
+      success: true,
+      data: {
+        tables: formattedTables
+      }
+    });
+  } catch (error: any) {
+    logger.error('[CONNECTION] Get schema metadata failed:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to get schema metadata',
+      code: 'SCHEMA_METADATA_ERROR'
     });
   }
 };

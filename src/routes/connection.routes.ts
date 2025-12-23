@@ -99,6 +99,14 @@ router.get('/:id/schemas/:schemaName/tables', authenticate, connectionController
 router.get('/:id/relations', authenticate, connectionController.getRelations);
 
 /**
+ * @route   GET /api/connections/:id/schema-metadata
+ * @desc    Get full schema metadata for SQL editor autocomplete
+ * @access  Private
+ * @returns All tables and columns for selected schemas
+ */
+router.get('/:id/schema-metadata', authenticate, connectionController.getSchemaMetadata);
+
+/**
  * @route   POST /api/connections/:id/extensions
  * @desc    Enable a PostgreSQL extension
  * @access  Private

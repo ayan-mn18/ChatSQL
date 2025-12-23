@@ -62,7 +62,10 @@ export const createViewer = async (req: Request, res: Response): Promise<void> =
         tempPassword,
         adminName,
         viewer.expires_at || undefined,
-        mustChangePassword ?? true
+        mustChangePassword ?? true,
+        adminUserId, // sender user ID
+        undefined, // no specific connection for global viewer
+        undefined  // no invitation ID for this flow
       );
     }
 
@@ -169,7 +172,10 @@ export const upsertViewer = async (req: Request, res: Response): Promise<void> =
         result.tempPassword,
         adminName,
         result.viewer.expires_at || undefined,
-        mustChangePassword ?? true
+        mustChangePassword ?? true,
+        adminUserId, // sender user ID
+        undefined, // no specific connection for global viewer
+        undefined  // no invitation ID for this flow
       );
     }
 
@@ -609,7 +615,11 @@ export const resendViewerInvite = async (req: Request, res: Response): Promise<v
       viewer.email,
       newTempPassword,
       adminName,
-      newExpiresAt || undefined
+      newExpiresAt || undefined,
+      true, // must change password
+      adminUserId, // sender user ID
+      undefined, // no specific connection
+      undefined  // no invitation ID
     );
 
     res.status(200).json({

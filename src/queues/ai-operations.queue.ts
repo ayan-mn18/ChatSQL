@@ -17,6 +17,7 @@ import { decrypt } from '../utils/encryption';
 import { logger } from '../utils/logger';
 import { generateSqlFromPrompt, explainSqlQuery } from '../service/ai.service';
 import { saveAIGeneratedQuery } from '../service/query-history.service';
+import * as chatService from '../services/chat.service';
 
 // ============================================
 // AI OPERATIONS QUEUE
@@ -248,12 +249,17 @@ export function createAIOperationsWorker(): Worker<AIOperationJobData> {
             logger.info(`[AI_OPS_WORKER] Generate SQL for prompt: "${data.prompt.substring(0, 50)}..."`);
             
             job.updateProgress(10);
+
+            const chatHistory = data.conversationId
+              ? await chatService.getChatMessages(data.conversationId, 12)
+              : undefined;
             
             // Generate SQL using AI service
             const aiResult = await generateSqlFromPrompt(
               connectionId,
               data.prompt,
-              data.selectedSchemas
+              data.selectedSchemas,
+              { chatHistory }
             );
             
             job.updateProgress(80);

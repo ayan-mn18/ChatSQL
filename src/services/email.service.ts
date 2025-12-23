@@ -1,6 +1,7 @@
 import nodemailer from 'nodemailer';
 import { Transporter } from 'nodemailer';
 import { logger } from '../utils/logger';
+import { logEmailSent, updateEmailLogStatus } from './email-logger.service';
 
 // Email configuration from environment variables
 // Note: Using Brevo SMTP credentials from .env
@@ -57,13 +58,28 @@ export const generateOtp = (): string => {
  */
 export const sendVerificationEmail = async (
   email: string,
-  otp: string
+  otp: string,
+  recipientUserId?: string
 ): Promise<boolean> => {
+  let emailLogId: string | null = null;
   try {
     const transport = getTransporter();
     const template = emailTemplates.verificationOtp(otp);
     
-    await transport.sendMail({
+    // Log email before sending
+    emailLogId = await logEmailSent({
+      toEmail: email,
+      fromEmail: SMTP_FROM_EMAIL,
+      subject: template.subject,
+      emailType: 'verification',
+      recipientUserId,
+      htmlContent: template.html,
+      textContent: template.text,
+      templateUsed: 'verificationOtp',
+      variables: { otp }
+    });
+
+    const info = await transport.sendMail({
       from: `"${SMTP_FROM_NAME}" <${SMTP_FROM_EMAIL}>`,
       to: email,
       subject: template.subject,
@@ -71,9 +87,29 @@ export const sendVerificationEmail = async (
       html: template.html,
     });
     
+    // Update log with success status
+    if (emailLogId) {
+      await updateEmailLogStatus({
+        id: emailLogId,
+        status: 'sent',
+        smtpMessageId: info.messageId,
+        smtpResponse: info.response,
+        sentAt: new Date()
+      });
+    }
+
     logger.info(`✅ [EMAIL] Verification OTP sent to ${email}`);
     return true;
-  } catch (error) {
+  } catch (error: any) {
+    // Update log with failure status
+    if (emailLogId) {
+      await updateEmailLogStatus({
+        id: emailLogId,
+        status: 'failed',
+        errorMessage: error.message,
+        failedAt: new Date()
+      });
+    }
     logger.error(`❌ [EMAIL] Failed to send verification email to ${email}:`, error);
     return false;
   }
@@ -85,13 +121,28 @@ export const sendVerificationEmail = async (
 export const sendPasswordResetEmail = async (
   email: string,
   resetToken: string,
-  resetUrl: string
+  resetUrl: string,
+  recipientUserId?: string
 ): Promise<boolean> => {
+  let emailLogId: string | null = null;
   try {
     const transport = getTransporter();
     const template = emailTemplates.passwordReset(resetUrl);
     
-    await transport.sendMail({
+    // Log email before sending
+    emailLogId = await logEmailSent({
+      toEmail: email,
+      fromEmail: SMTP_FROM_EMAIL,
+      subject: template.subject,
+      emailType: 'password_reset',
+      recipientUserId,
+      htmlContent: template.html,
+      textContent: template.text,
+      templateUsed: 'passwordReset',
+      variables: { resetUrl }
+    });
+
+    const info = await transport.sendMail({
       from: `"${SMTP_FROM_NAME}" <${SMTP_FROM_EMAIL}>`,
       to: email,
       subject: template.subject,
@@ -99,9 +150,29 @@ export const sendPasswordResetEmail = async (
       html: template.html,
     });
     
+    // Update log with success status
+    if (emailLogId) {
+      await updateEmailLogStatus({
+        id: emailLogId,
+        status: 'sent',
+        smtpMessageId: info.messageId,
+        smtpResponse: info.response,
+        sentAt: new Date()
+      });
+    }
+
     logger.info(`✅ [EMAIL] Password reset email sent to ${email}`);
     return true;
-  } catch (error) {
+  } catch (error: any) {
+    // Update log with failure status
+    if (emailLogId) {
+      await updateEmailLogStatus({
+        id: emailLogId,
+        status: 'failed',
+        errorMessage: error.message,
+        failedAt: new Date()
+      });
+    }
     logger.error(`❌ [EMAIL] Failed to send password reset email to ${email}:`, error);
     return false;
   }
@@ -112,13 +183,28 @@ export const sendPasswordResetEmail = async (
  */
 export const sendWelcomeEmail = async (
   email: string,
-  username?: string
+  username?: string,
+  recipientUserId?: string
 ): Promise<boolean> => {
+  let emailLogId: string | null = null;
   try {
     const transport = getTransporter();
     const template = emailTemplates.welcome(username);
     
-    await transport.sendMail({
+    // Log email before sending
+    emailLogId = await logEmailSent({
+      toEmail: email,
+      fromEmail: SMTP_FROM_EMAIL,
+      subject: template.subject,
+      emailType: 'welcome',
+      recipientUserId,
+      htmlContent: template.html,
+      textContent: template.text,
+      templateUsed: 'welcome',
+      variables: { username }
+    });
+
+    const info = await transport.sendMail({
       from: `"${SMTP_FROM_NAME}" <${SMTP_FROM_EMAIL}>`,
       to: email,
       subject: template.subject,
@@ -126,9 +212,29 @@ export const sendWelcomeEmail = async (
       html: template.html,
     });
     
+    // Update log with success status
+    if (emailLogId) {
+      await updateEmailLogStatus({
+        id: emailLogId,
+        status: 'sent',
+        smtpMessageId: info.messageId,
+        smtpResponse: info.response,
+        sentAt: new Date()
+      });
+    }
+
     logger.info(`✅ [EMAIL] Welcome email sent to ${email}`);
     return true;
-  } catch (error) {
+  } catch (error: any) {
+    // Update log with failure status
+    if (emailLogId) {
+      await updateEmailLogStatus({
+        id: emailLogId,
+        status: 'failed',
+        errorMessage: error.message,
+        failedAt: new Date()
+      });
+    }
     logger.error(`❌ [EMAIL] Failed to send welcome email to ${email}:`, error);
     return false;
   }
@@ -142,13 +248,32 @@ export const sendViewerInvitationEmail = async (
   tempPassword: string,
   invitedByName: string,
   expiresAt?: Date,
-  mustChangePassword: boolean = true
+  mustChangePassword: boolean = true,
+  senderUserId?: string,
+  connectionId?: string,
+  viewerInvitationId?: string
 ): Promise<boolean> => {
+  let emailLogId: string | null = null;
   try {
     const transport = getTransporter();
     const template = emailTemplates.viewerInvitation(email, tempPassword, invitedByName, expiresAt, mustChangePassword);
     
-    await transport.sendMail({
+    // Log email before sending
+    emailLogId = await logEmailSent({
+      toEmail: email,
+      fromEmail: SMTP_FROM_EMAIL,
+      subject: template.subject,
+      emailType: 'viewer_invitation',
+      senderUserId,
+      connectionId,
+      viewerInvitationId,
+      htmlContent: template.html,
+      textContent: template.text,
+      templateUsed: 'viewerInvitation',
+      variables: { invitedByName, expiresAt: expiresAt?.toISOString(), mustChangePassword }
+    });
+
+    const info = await transport.sendMail({
       from: `"${SMTP_FROM_NAME}" <${SMTP_FROM_EMAIL}>`,
       to: email,
       subject: template.subject,
@@ -156,9 +281,29 @@ export const sendViewerInvitationEmail = async (
       html: template.html,
     });
     
+    // Update log with success status
+    if (emailLogId) {
+      await updateEmailLogStatus({
+        id: emailLogId,
+        status: 'sent',
+        smtpMessageId: info.messageId,
+        smtpResponse: info.response,
+        sentAt: new Date()
+      });
+    }
+
     logger.info(`✅ [EMAIL] Viewer invitation sent to ${email}`);
     return true;
-  } catch (error) {
+  } catch (error: any) {
+    // Update log with failure status
+    if (emailLogId) {
+      await updateEmailLogStatus({
+        id: emailLogId,
+        status: 'failed',
+        errorMessage: error.message,
+        failedAt: new Date()
+      });
+    }
     logger.error(`❌ [EMAIL] Failed to send viewer invitation to ${email}:`, error);
     return false;
   }

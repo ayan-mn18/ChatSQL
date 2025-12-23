@@ -4,6 +4,14 @@ import { sequelize } from '../config/db';
 import { decrypt } from '../utils/encryption';
 import { getRedisClient } from '../config/redis';
 import { logger } from '../utils/logger';
+import { GOOGLE_AI_MODEL } from '../config/env';
+import {
+  buildExplainSqlPrompt,
+  buildExtractRelevantMetadataPrompt,
+  buildSqlGenerationPrompt,
+} from './ai.prompts';
+
+import type { ChatMessage } from '../services/chat.service';
 
 import { 
   getRecentQueryHistory, 
@@ -14,11 +22,11 @@ import {
 // ============================================
 // AI SERVICE
 // Handles AI-powered SQL generation and query explanation
-// Using Google Gemini 2.0 Flash
+// Using Google Gemini (model configurable)
 // ============================================
 
 const genAI = new GoogleGenerativeAI(process.env.GOOGLE_AI_API_KEY || '');
-const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
+const model = genAI.getGenerativeModel({ model: GOOGLE_AI_MODEL });
 
 // Cache TTL for AI context (1 hour)
 const AI_CONTEXT_TTL = 3600;
@@ -229,76 +237,72 @@ async function generateDbMetadata(
 // AI SQL GENERATION
 // ============================================
 
-const SQL_GENERATION_SYSTEM_PROMPT = `You are an expert SQL query generator for a PostgreSQL database. 
-Your task is to generate optimized SQL queries based on user requests and provide detailed reasoning about your approach.
-
-### Guidelines:
-- Use only tables, relationships & columns from the Database Schema JSON
-- Ensure all foreign keys are properly joined and maintain referential integrity
-- Optimize queries to minimize full-table scans and improve efficiency
-- If a required table or relationship is missing, return appropriate error information
-- Never make assumptions about missing data or relationships
-- Return a JSON response containing both the SQL query and your reasoning process
-- Always prefix table names with their schema (e.g., public.users)
-- Use proper SQL formatting with line breaks for readability
-
-### Response Format (JSON only, no markdown):
-{
-  "query": "SELECT ...",
-  "reasoning": {
-    "steps": ["Step 1", "Step 2", ...],
-    "optimization_notes": ["Note 1", "Note 2", ...]
-  },
-  "tables_used": ["schema.table1", "schema.table2"],
-  "columns_used": ["table1.column1", "table2.column2"],
-  "desc": "A detailed explanation of what this query does and what data it returns"
-}`;
-
 /**
  * Extract relevant metadata based on user query
  */
 async function extractRelevantMetadata(
   userQuery: string, 
-  fullMetadata: string
+  fullMetadata: string,
+  conversationContext?: string
 ): Promise<string> {
-  const prompt = `You are a database schema analyzer. Return only JSON.
-
-### Task:
-- Extract **only the necessary tables, columns, and relationships** required to answer the user's query.
-- Do **not** include unrelated tables or columns.
-- If no relevant data exists, return "{}" (empty JSON object).
-- Ensure foreign key relations are included.
-
-### Database Metadata:
-${fullMetadata}
-
-### User Query:
-"${userQuery}"
-
-### Output Format (JSON only):
-{
-  "metadata": {
-    "tables": [
-      {
-        "schema": "schema_name",
-        "name": "table_name",
-        "columns": [{"name": "column1", "type": "type1"}]
-      }
-    ],
-    "relationships": [
-      { "from": "schema.table.column", "to": "schema.table.column" }
-    ]
-  }
-}`;
+  const prompt = buildExtractRelevantMetadataPrompt({
+    userQuery,
+    fullMetadata,
+    conversationContext,
+  });
 
   const result = await model.generateContent({
     contents: [{ role: 'user', parts: [{ text: prompt }] }],
     generationConfig: {
-      temperature: 0.3,
+      temperature: 0.1,
     },
   });
 
   return result.response.text() || '{}';
+}
+
+function formatChatHistoryForSqlGeneration(
+  chatHistory: ChatMessage[] | undefined,
+  latestUserRequest: string
+): string {
+  if (!chatHistory || chatHistory.length === 0) return '';
+
+  const MAX_MESSAGES = 12;
+  const MAX_CHARS_PER_MESSAGE = 700;
+
+  const recent = chatHistory.slice(-MAX_MESSAGES);
+
+  // If the latest message duplicates the current request, omit it to avoid repetition.
+  const withoutDuplicateCurrent = (() => {
+    const last = recent[recent.length - 1];
+    if (last?.role === 'user' && last.content?.trim() === latestUserRequest.trim()) {
+      return recent.slice(0, -1);
+    }
+    return recent;
+  })();
+
+  if (withoutDuplicateCurrent.length === 0) return '';
+
+  const lines: string[] = [];
+  lines.push('### Chat history (oldest → newest):');
+
+  for (const msg of withoutDuplicateCurrent) {
+    const roleLabel = msg.role === 'user' ? 'User' : 'Assistant';
+    const normalized = (msg.content || '').replace(/\s+/g, ' ').trim();
+    const clipped = normalized.length > MAX_CHARS_PER_MESSAGE
+      ? `${normalized.slice(0, MAX_CHARS_PER_MESSAGE)}...`
+      : normalized;
+
+    lines.push(`${roleLabel}: ${clipped}`);
+
+    if (msg.role === 'assistant' && msg.sqlGenerated) {
+      const sql = msg.sqlGenerated.replace(/\s+/g, ' ').trim();
+      const sqlClipped = sql.length > 400 ? `${sql.slice(0, 400)}...` : sql;
+      lines.push(`(assistant previously generated SQL): ${sqlClipped}`);
+    }
+  }
+
+  return lines.join('\n');
 }
 
 /**
@@ -307,16 +311,22 @@ ${fullMetadata}
 export async function generateSqlFromPrompt(
   connectionId: string,
   prompt: string,
-  selectedSchemas: string[]
+  selectedSchemas: string[],
+  options?: {
+    chatHistory?: ChatMessage[];
+  }
 ): Promise<GenerateSqlResult> {
   logger.info(`[AI_SERVICE] Generating SQL for: "${prompt.substring(0, 50)}..."`);
   
   // Get database metadata
   const metadata = await generateDbMetadata(connectionId, selectedSchemas);
   const metadataStr = JSON.stringify(metadata);
+
+  // Chat history context (very important for intent/constraints)
+  const conversationContext = formatChatHistoryForSqlGeneration(options?.chatHistory, prompt);
   
   // Extract relevant parts for the query
-  const relevantMetadata = await extractRelevantMetadata(prompt, metadataStr);
+  const relevantMetadata = await extractRelevantMetadata(prompt, metadataStr, conversationContext);
   
   // Get query history for context
   const [recentQueries, aiQueries] = await Promise.all([
@@ -329,35 +339,18 @@ export async function generateSqlFromPrompt(
   logger.debug(`[AI_SERVICE] Relevant metadata extracted, query history: ${recentQueries.length} recent, ${aiQueries.length} AI-generated`);
   
   // Generate SQL
-  const sqlPrompt = `${SQL_GENERATION_SYSTEM_PROMPT}
-
-Full Schema:
-${metadataStr}
-
-### Task:
-Generate an optimized PostgreSQL query based on the user's request.
-
-### Database Schema:
-${relevantMetadata}
-${queryHistoryContext}
-
-### User Request:
-"${prompt}"
-
-### Rules:
-1. Use only the provided tables and columns
-2. Always use schema-qualified table names (e.g., public.users)
-3. Properly join tables using foreign keys
-4. Return clean, formatted SQL
-5. Include a description of what the query returns
-6. Learn from the query history patterns if available
-
-Return ONLY a JSON object with the query and reasoning.`;
+  const sqlPrompt = buildSqlGenerationPrompt({
+    fullSchemaJson: metadataStr,
+    relevantSchemaJson: relevantMetadata,
+    queryHistoryContext,
+    conversationContext,
+    userRequest: prompt,
+  });
 
   const result = await model.generateContent({
     contents: [{ role: 'user', parts: [{ text: sqlPrompt }] }],
     generationConfig: {
-      temperature: 0.2,
+      temperature: 0.1,
     },
   });
 
@@ -395,7 +388,7 @@ function parseAIResponse(aiResponse: string): GenerateSqlResult {
     logger.error('[AI_SERVICE] Failed to parse AI response:', error);
     
     // Try to extract SQL from raw response
-    const sqlMatch = aiResponse.match(/SELECT[\s\S]*?;/i);
+    const sqlMatch = aiResponse.match(/(?:WITH|SELECT|INSERT|UPDATE|DELETE)[\s\S]*?;/i);
     
     return {
       query: sqlMatch ? sqlMatch[0] : '',
@@ -426,22 +419,10 @@ export async function explainSqlQuery(
   // Get schema context for better explanation
   const metadata = await generateDbMetadata(connectionId, []);
   
-  const prompt = `You are a SQL expert. Explain queries clearly and concisely.
-
-### Task:
-Explain what this SQL query does in plain English. Be clear and concise.
-
-### Database Schema Context:
-${JSON.stringify(metadata.tables.slice(0, 20))} // Limit context size
-
-### SQL Query:
-${sql}
-
-### Instructions:
-1. Explain what data this query retrieves or modifies
-2. Explain any joins and filtering conditions
-3. Note any performance considerations
-4. Keep the explanation accessible to non-technical users`;
+  const prompt = buildExplainSqlPrompt({
+    schemaContextJson: JSON.stringify(metadata.tables.slice(0, 20)),
+    sql,
+  });
 
   const result = await model.generateContent({
     contents: [{ role: 'user', parts: [{ text: prompt }] }],

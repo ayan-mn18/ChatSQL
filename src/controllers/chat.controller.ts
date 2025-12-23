@@ -4,6 +4,7 @@ import { sequelize } from '../config/db';
 import { getRedisClient } from '../config/redis';
 import { logger } from '../utils/logger';
 import { GoogleGenerativeAI } from '@google/generative-ai';
+import { GOOGLE_AI_MODEL } from '../config/env';
 import * as chatService from '../services/chat.service';
 import { viewerHasConnectionAccess } from '../services/viewer.service';
 import { generateSqlFromPrompt } from '../service/ai.service';
@@ -15,7 +16,7 @@ import { saveAIGeneratedQuery } from '../service/query-history.service';
 // ============================================
 
 const genAI = new GoogleGenerativeAI(process.env.GOOGLE_AI_API_KEY || '');
-const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
+const model = genAI.getGenerativeModel({ model: GOOGLE_AI_MODEL });
 
 /**
  * @route   GET /api/chat/:connectionId/session
@@ -239,7 +240,9 @@ export const streamChatResponse = async (req: Request, res: Response): Promise<v
     try {
       if (shouldGenerateSQL) {
         // Use existing AI service for SQL generation
-        sqlResult = await generateSqlFromPrompt(connectionId, message.trim(), selectedSchemas);
+        sqlResult = await generateSqlFromPrompt(connectionId, message.trim(), selectedSchemas, {
+          chatHistory,
+        });
         
         // Format the response as markdown
         fullContent = formatAIResponse(sqlResult);

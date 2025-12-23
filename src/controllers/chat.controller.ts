@@ -3,8 +3,7 @@ import { QueryTypes } from 'sequelize';
 import { sequelize } from '../config/db';
 import { getRedisClient } from '../config/redis';
 import { logger } from '../utils/logger';
-import { GoogleGenerativeAI } from '@google/generative-ai';
-import { GOOGLE_AI_MODEL } from '../config/env';
+import { generateGeminiText } from '../service/gemini.client';
 import * as chatService from '../services/chat.service';
 import { viewerHasConnectionAccess } from '../services/viewer.service';
 import { generateSqlFromPrompt } from '../service/ai.service';
@@ -14,9 +13,6 @@ import { saveAIGeneratedQuery } from '../service/query-history.service';
 // CHAT CONTROLLER
 // Handles AI chat sessions and streaming responses
 // ============================================
-
-const genAI = new GoogleGenerativeAI(process.env.GOOGLE_AI_API_KEY || '');
-const model = genAI.getGenerativeModel({ model: GOOGLE_AI_MODEL });
 
 /**
  * @route   GET /api/chat/:connectionId/session
@@ -263,8 +259,7 @@ Current user message: "${message}"
 
 Respond naturally and conversationally. Remember the context of previous messages. If they're asking about SQL or database queries, let them know you can help generate SQL queries. Keep your response concise and friendly.`;
         
-        const result = await model.generateContent(conversationPrompt);
-        fullContent = result.response.text();
+        fullContent = await generateGeminiText(conversationPrompt);
       }
       
       // Stream the response in chunks to simulate typing

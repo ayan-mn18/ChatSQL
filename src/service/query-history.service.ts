@@ -5,6 +5,9 @@ import { logger } from '../utils/logger';
 // ============================================
 // QUERY HISTORY SERVICE
 // Handles storing and retrieving query history
+// 
+// NOTE: The queries table is managed via database migrations (database/migration-v0/schema.sql).
+// All columns are guaranteed to exist. No runtime table creation or column detection is performed.
 // ============================================
 
 export interface QueryHistoryEntry {
@@ -37,121 +40,6 @@ export interface SaveQueryParams {
   savedQueryId?: string;
   chatMessageId?: string;
   queryType?: string;
-}
-
-let ensuredQueriesTablePromise: Promise<void> | null = null;
-
-async function ensureQueriesTableExists(): Promise<void> {
-  if (ensuredQueriesTablePromise) return ensuredQueriesTablePromise;
-
-  ensuredQueriesTablePromise = (async () => {
-    // If the table already exists, do NOT attempt any DDL.
-    // (Production DB roles often cannot CREATE EXTENSION/TABLE, even if they can INSERT.)
-    const tableExists = await sequelize.query<{ exists: boolean }>(
-      `SELECT EXISTS (
-        SELECT 1
-        FROM information_schema.tables
-        WHERE table_name = 'queries'
-      ) as "exists"`,
-      { type: QueryTypes.SELECT }
-    );
-
-    if (tableExists?.[0]?.exists) {
-      return;
-    }
-
-    // Dev/bootstrap path only: try to create required objects.
-    // Best-effort: if this fails due to permissions, history saving will be unavailable.
-    try {
-      await sequelize.query('CREATE EXTENSION IF NOT EXISTS "uuid-ossp";');
-    } catch (e) {
-      logger.warn('[QUERY_HISTORY] Skipping uuid-ossp extension creation (insufficient privileges?)');
-    }
-
-    await sequelize.query(
-      `CREATE TABLE IF NOT EXISTS queries (
-        id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-        connection_id UUID NOT NULL REFERENCES connections(id) ON DELETE CASCADE,
-        query_text TEXT NOT NULL,
-        raw_result JSONB,
-        row_count INTEGER,
-        execution_time_ms INTEGER,
-        status VARCHAR(50) NOT NULL DEFAULT 'success',
-        error_message TEXT,
-        is_saved BOOLEAN DEFAULT FALSE,
-        saved_name VARCHAR(255),
-        is_ai_generated BOOLEAN DEFAULT FALSE,
-        ai_prompt TEXT,
-        tables_used JSONB,
-        columns_used JSONB,
-        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-      );`
-    );
-
-    // Helpful indexes (safe with IF NOT EXISTS)
-    await sequelize.query('CREATE INDEX IF NOT EXISTS idx_queries_user_id ON queries(user_id);');
-    await sequelize.query('CREATE INDEX IF NOT EXISTS idx_queries_connection_id ON queries(connection_id);');
-    await sequelize.query('CREATE INDEX IF NOT EXISTS idx_queries_is_saved ON queries(is_saved);');
-    await sequelize.query('CREATE INDEX IF NOT EXISTS idx_queries_created_at ON queries(created_at DESC);');
-    await sequelize.query('CREATE INDEX IF NOT EXISTS idx_queries_is_ai_generated ON queries(is_ai_generated) WHERE is_ai_generated = true;');
-
-    // Optional columns used by the SQL editor schema (only add if missing)
-    // saved_query_id
-    await sequelize.query(
-      `DO $$
-      BEGIN
-        IF NOT EXISTS (
-          SELECT 1 FROM information_schema.columns
-          WHERE table_name = 'queries' AND column_name = 'saved_query_id'
-        ) THEN
-          -- Add without FK first; later migrations can add/adjust constraints safely
-          ALTER TABLE queries ADD COLUMN saved_query_id UUID;
-          CREATE INDEX IF NOT EXISTS idx_queries_saved_query_id ON queries(saved_query_id);
-        END IF;
-      END $$;`
-    );
-
-    // chat_message_id
-    await sequelize.query(
-      `DO $$
-      BEGIN
-        IF NOT EXISTS (
-          SELECT 1 FROM information_schema.columns
-          WHERE table_name = 'queries' AND column_name = 'chat_message_id'
-        ) THEN
-          ALTER TABLE queries ADD COLUMN chat_message_id UUID;
-          CREATE INDEX IF NOT EXISTS idx_queries_chat_message_id ON queries(chat_message_id);
-        END IF;
-      END $$;`
-    );
-
-    // query_type
-    await sequelize.query(
-      `DO $$
-      BEGIN
-        IF NOT EXISTS (
-          SELECT 1 FROM information_schema.columns
-          WHERE table_name = 'queries' AND column_name = 'query_type'
-        ) THEN
-          ALTER TABLE queries ADD COLUMN query_type VARCHAR(20) DEFAULT 'SELECT';
-          CREATE INDEX IF NOT EXISTS idx_queries_query_type ON queries(query_type);
-        END IF;
-      END $$;`
-    );
-  })();
-
-  return ensuredQueriesTablePromise;
-}
-
-async function getQueriesTableColumns(): Promise<Set<string>> {
-  const cols = await sequelize.query<{ column_name: string }>(
-    `SELECT column_name
-     FROM information_schema.columns
-     WHERE table_name = 'queries'`,
-    { type: QueryTypes.SELECT }
-  );
-  return new Set(cols.map(c => c.column_name));
 }
 
 /**
@@ -229,9 +117,6 @@ export async function saveAIGeneratedQuery(params: {
  */
 async function saveQueryToHistory(params: SaveQueryParams): Promise<string | null> {
   try {
-    await ensureQueriesTableExists();
-    const columns = await getQueriesTableColumns();
-
     const insertCols: string[] = [
       'user_id',
       'connection_id',
@@ -244,12 +129,11 @@ async function saveQueryToHistory(params: SaveQueryParams): Promise<string | nul
       'ai_prompt',
       'tables_used',
       'columns_used',
+      'raw_result',
+      'saved_query_id',
+      'chat_message_id',
+      'query_type',
     ];
-
-    if (columns.has('raw_result')) insertCols.push('raw_result');
-    if (columns.has('saved_query_id')) insertCols.push('saved_query_id');
-    if (columns.has('chat_message_id')) insertCols.push('chat_message_id');
-    if (columns.has('query_type')) insertCols.push('query_type');
 
     const valuesSql = insertCols.map((c) => {
       switch (c) {
@@ -316,11 +200,6 @@ async function saveQueryToHistory(params: SaveQueryParams): Promise<string | nul
 
     const rows = result[0] as Array<{ id: string }>;
     const id = rows?.[0]?.id;
-
-    logger.info(`[QUERY_HISTORY] Saved query to history`, {
-      queryId: id,
-      isAiGenerated: params.isAiGenerated,
-    });
 
     return id || null;
   } catch (error) {

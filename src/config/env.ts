@@ -30,8 +30,8 @@ const envSchema = z.object({
   // AI Services (optional)
   GOOGLE_AI_API_KEY: z.string().optional(),
   // Gemini model name (optional)
-  // Example: gemini-3.0-flash
-  GOOGLE_AI_MODEL: z.string().default('gemini-3.0-flash'),
+  // Example: gemini-1.5-flash
+  GOOGLE_AI_MODEL: z.string().default('gemini-1.5-flash'),
   OPENAI_API_KEY: z.string().optional(),
   ANTHROPIC_API_KEY: z.string().optional(),
   

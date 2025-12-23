@@ -1,10 +1,9 @@
 import { Sequelize, QueryTypes } from 'sequelize';
-import { GoogleGenerativeAI } from '@google/generative-ai';
 import { sequelize } from '../config/db';
 import { decrypt } from '../utils/encryption';
 import { getRedisClient } from '../config/redis';
 import { logger } from '../utils/logger';
-import { GOOGLE_AI_MODEL } from '../config/env';
+import { generateGeminiText } from './gemini.client';
 import {
   buildExplainSqlPrompt,
   buildExtractRelevantMetadataPrompt,
@@ -24,9 +23,6 @@ import {
 // Handles AI-powered SQL generation and query explanation
 // Using Google Gemini (model configurable)
 // ============================================
-
-const genAI = new GoogleGenerativeAI(process.env.GOOGLE_AI_API_KEY || '');
-const model = genAI.getGenerativeModel({ model: GOOGLE_AI_MODEL });
 
 // Cache TTL for AI context (1 hour)
 const AI_CONTEXT_TTL = 3600;
@@ -251,14 +247,14 @@ async function extractRelevantMetadata(
     conversationContext,
   });
 
-  const result = await model.generateContent({
+  const text = await generateGeminiText({
     contents: [{ role: 'user', parts: [{ text: prompt }] }],
     generationConfig: {
       temperature: 0.1,
     },
   });
 
-  return result.response.text() || '{}';
+  return text || '{}';
 }
 
 function formatChatHistoryForSqlGeneration(
@@ -347,17 +343,15 @@ export async function generateSqlFromPrompt(
     userRequest: prompt,
   });
 
-  const result = await model.generateContent({
+  const aiResponse = await generateGeminiText({
     contents: [{ role: 'user', parts: [{ text: sqlPrompt }] }],
     generationConfig: {
       temperature: 0.1,
     },
   });
-
-  const aiResponse = result.response.text() || '';
   
   // Parse and sanitize the response
-  return parseAIResponse(aiResponse);
+  return parseAIResponse(aiResponse || '');
 }
 
 /**
@@ -424,14 +418,14 @@ export async function explainSqlQuery(
     sql,
   });
 
-  const result = await model.generateContent({
+  const text = await generateGeminiText({
     contents: [{ role: 'user', parts: [{ text: prompt }] }],
     generationConfig: {
       temperature: 0.3,
     },
   });
 
-  return result.response.text() || 'Unable to generate explanation';
+  return text || 'Unable to generate explanation';
 }
 
 /**

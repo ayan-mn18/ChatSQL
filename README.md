@@ -47,11 +47,16 @@ A modern database visualizer with analytics and AI-powered query generation. Mak
 4. **Set up the database**
    ```bash
    # Create the database
-   psql -U postgres -c "CREATE DATABASE chatsql;"
+   createdb chatsql
    
-   # Run the schema
-   psql -U postgres -d chatsql -f database/schema.sql
+   # Run the complete schema migration
+   psql -U postgres -d chatsql -f database/migration-v0/schema.sql
+   
+   # Optional: Add seed data for development
+   psql -U postgres -d chatsql -f database/seed.sql
    ```
+   
+   See [DATABASE_SETUP.md](DATABASE_SETUP.md) for detailed instructions.
 
 5. **Start the development server**
    ```bash
@@ -65,8 +70,10 @@ The API will be available at `http://localhost:3000`
 ```
 ChatSQL/
 ├── database/
-│   ├── schema.sql          # Database schema
-│   └── seed.sql            # Seed data (optional)
+│   ├── migration-v0/
+│   │   └── schema.sql      # Complete database schema (v0)
+│   ├── seed.sql            # Seed data (optional)
+│   └── README.md           # Database documentation
 ├── src/
 │   ├── config/             # Configuration files
 │   ├── controllers/        # Route controllers

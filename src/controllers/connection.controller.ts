@@ -2228,6 +2228,183 @@ export const executeQuery = async (req: Request, res: Response): Promise<void> =
 };
 
 /**
+ * Get workspace-wide analytics (across all user's connections)
+ * GET /api/connections/analytics/workspace
+ */
+export const getWorkspaceAnalytics = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const userId = req.userId;
+    logger.info(`[CONNECTION] Get workspace analytics for user: ${userId}`);
+    
+    // Check cache first
+    const cacheKey = `user:${userId}:workspace:analytics`;
+    const cached = await getFromCache<any>(cacheKey);
+    
+    if (cached) {
+      logger.info(`[CONNECTION] Returning cached workspace analytics`);
+      res.json({
+        success: true,
+        ...cached.data,
+        cached: true,
+        cachedAt: cached.cachedAt
+      });
+      return;
+    }
+    
+    // Get all query stats across user's connections
+    const [queryStats] = await sequelize.query<any>(
+      `SELECT 
+        count(*) as total_queries,
+        count(*) FILTER (WHERE is_ai_generated = true) as ai_queries,
+        count(*) FILTER (WHERE is_ai_generated = false) as manual_queries,
+        count(*) FILTER (WHERE status = 'success') as successful_queries,
+        count(*) FILTER (WHERE status = 'error') as failed_queries,
+        avg(execution_time_ms) as avg_execution_time,
+        max(execution_time_ms) as max_execution_time,
+        sum(row_count) as total_rows_returned,
+        count(DISTINCT connection_id) as active_connections,
+        count(DISTINCT DATE(created_at)) as active_days
+      FROM queries q
+      JOIN connections c ON q.connection_id = c.id
+      WHERE c.user_id = :userId`,
+      {
+        replacements: { userId },
+        type: QueryTypes.SELECT
+      }
+    );
+    
+    // Get query trends (last 30 days)
+    const queryTrends = await sequelize.query<any>(
+      `SELECT 
+        DATE(q.created_at) as date,
+        count(*) as total,
+        count(*) FILTER (WHERE q.is_ai_generated = true) as ai_count,
+        count(*) FILTER (WHERE q.is_ai_generated = false) as manual_count,
+        count(*) FILTER (WHERE q.status = 'error') as error_count
+      FROM queries q
+      JOIN connections c ON q.connection_id = c.id
+      WHERE c.user_id = :userId AND q.created_at >= NOW() - INTERVAL '30 days'
+      GROUP BY DATE(q.created_at)
+      ORDER BY date ASC`,
+      {
+        replacements: { userId },
+        type: QueryTypes.SELECT
+      }
+    );
+    
+    // Get top connections by query count
+    const topConnections = await sequelize.query<any>(
+      `SELECT 
+        c.id,
+        c.name,
+        c.database_name,
+        count(q.id) as query_count,
+        avg(q.execution_time_ms) as avg_execution_time
+      FROM connections c
+      LEFT JOIN queries q ON c.id = q.connection_id
+      WHERE c.user_id = :userId
+      GROUP BY c.id, c.name, c.database_name
+      ORDER BY query_count DESC
+      LIMIT 5`,
+      {
+        replacements: { userId },
+        type: QueryTypes.SELECT
+      }
+    );
+    
+    // Get recent queries across all connections
+    const recentQueries = await sequelize.query<any>(
+      `SELECT 
+        q.id, q.query_text, q.execution_time_ms, q.row_count, 
+        q.status, q.is_ai_generated, q.created_at,
+        c.name as connection_name, c.database_name
+      FROM queries q
+      JOIN connections c ON q.connection_id = c.id
+      WHERE c.user_id = :userId
+      ORDER BY q.created_at DESC
+      LIMIT 20`,
+      {
+        replacements: { userId },
+        type: QueryTypes.SELECT
+      }
+    );
+    
+    // Get slowest queries across all connections
+    const slowestQueries = await sequelize.query<any>(
+      `SELECT 
+        q.id, q.query_text, q.execution_time_ms, q.row_count, 
+        q.is_ai_generated, q.created_at,
+        c.name as connection_name, c.database_name
+      FROM queries q
+      JOIN connections c ON q.connection_id = c.id
+      WHERE c.user_id = :userId AND q.status = 'success' AND q.execution_time_ms IS NOT NULL
+      ORDER BY q.execution_time_ms DESC
+      LIMIT 10`,
+      {
+        replacements: { userId },
+        type: QueryTypes.SELECT
+      }
+    );
+    
+    // Get query type distribution
+    const queryTypeDistribution = await sequelize.query<any>(
+      `SELECT 
+        q.query_type,
+        count(*) as count,
+        avg(q.execution_time_ms) as avg_time
+      FROM queries q
+      JOIN connections c ON q.connection_id = c.id
+      WHERE c.user_id = :userId AND q.query_type IS NOT NULL
+      GROUP BY q.query_type
+      ORDER BY count DESC`,
+      {
+        replacements: { userId },
+        type: QueryTypes.SELECT
+      }
+    );
+    
+    const analyticsData = {
+      summary: {
+        totalQueries: parseInt(queryStats?.total_queries || '0'),
+        aiQueries: parseInt(queryStats?.ai_queries || '0'),
+        manualQueries: parseInt(queryStats?.manual_queries || '0'),
+        successfulQueries: parseInt(queryStats?.successful_queries || '0'),
+        failedQueries: parseInt(queryStats?.failed_queries || '0'),
+        successRate: queryStats?.total_queries > 0 
+          ? Math.round((queryStats.successful_queries / queryStats.total_queries) * 100) 
+          : 100,
+        avgExecutionTime: Math.round(parseFloat(queryStats?.avg_execution_time || '0')),
+        maxExecutionTime: Math.round(parseFloat(queryStats?.max_execution_time || '0')),
+        totalRowsReturned: parseInt(queryStats?.total_rows_returned || '0'),
+        activeConnections: parseInt(queryStats?.active_connections || '0'),
+        activeDays: parseInt(queryStats?.active_days || '0'),
+      },
+      queryTrends,
+      topConnections,
+      recentQueries,
+      slowestQueries,
+      queryTypeDistribution,
+    };
+    
+    // Cache for 2 minutes
+    await setCache(cacheKey, analyticsData, 120);
+    
+    res.json({
+      success: true,
+      ...analyticsData,
+      cached: false
+    });
+  } catch (error: any) {
+    logger.error('[CONNECTION] Get workspace analytics failed:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to get workspace analytics',
+      code: 'WORKSPACE_ANALYTICS_ERROR'
+    });
+  }
+};
+
+/**
  * Get real-time database analytics and statistics
  * GET /api/connections/:id/analytics
  */

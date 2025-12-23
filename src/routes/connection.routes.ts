@@ -114,6 +114,13 @@ router.get('/:id/schema-metadata', authenticate, connectionController.getSchemaM
 router.post('/:id/extensions', authenticate, heavyRateLimit, validate(uuidParamSchema), connectionController.enableConnectionExtension);
 
 /**
+ * @route   GET /api/connections/analytics/workspace
+ * @desc    Get workspace-wide analytics across all user's connections
+ * @access  Private
+ */
+router.get('/analytics/workspace', authenticate, connectionController.getWorkspaceAnalytics);
+
+/**
  * @route   GET /api/connections/:id/analytics
  * @desc    Get real-time database analytics and statistics
  * @access  Private

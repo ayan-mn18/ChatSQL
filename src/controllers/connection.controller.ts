@@ -2363,6 +2363,18 @@ export const getWorkspaceAnalytics = async (req: Request, res: Response): Promis
       }
     );
     
+    // Get total saved queries count
+    const [savedQueriesStats] = await sequelize.query<any>(
+      `SELECT count(*) as saved_queries_count
+      FROM saved_queries sq
+      JOIN connections c ON sq.connection_id = c.id
+      WHERE c.user_id = :userId`,
+      {
+        replacements: { userId },
+        type: QueryTypes.SELECT
+      }
+    );
+    
     const analyticsData = {
       summary: {
         totalQueries: parseInt(queryStats?.total_queries || '0'),
@@ -2370,6 +2382,7 @@ export const getWorkspaceAnalytics = async (req: Request, res: Response): Promis
         manualQueries: parseInt(queryStats?.manual_queries || '0'),
         successfulQueries: parseInt(queryStats?.successful_queries || '0'),
         failedQueries: parseInt(queryStats?.failed_queries || '0'),
+        savedQueries: parseInt(savedQueriesStats?.saved_queries_count || '0'),
         successRate: queryStats?.total_queries > 0 
           ? Math.round((queryStats.successful_queries / queryStats.total_queries) * 100) 
           : 100,
@@ -2481,9 +2494,19 @@ export const getConnectionAnalytics = async (req: Request, res: Response): Promi
         avg(execution_time_ms) as avg_execution_time,
         avg(execution_time_ms) FILTER (WHERE is_ai_generated = true) as avg_ai_execution_time,
         avg(execution_time_ms) FILTER (WHERE is_ai_generated = false) as avg_manual_execution_time,
-        count(*) FILTER (WHERE status = 'error') as error_count,
-        count(*) FILTER (WHERE is_saved = true) as saved_queries_count
+        count(*) FILTER (WHERE status = 'error') as error_count
       FROM queries 
+      WHERE connection_id = :id`,
+      {
+        replacements: { id },
+        type: QueryTypes.SELECT
+      }
+    );
+    
+    // 3.5. Get actual saved queries count from saved_queries table
+    const [savedQueriesStats] = await sequelize.query<any>(
+      `SELECT count(*) as saved_queries_count
+      FROM saved_queries 
       WHERE connection_id = :id`,
       {
         replacements: { id },
@@ -2629,7 +2652,7 @@ export const getConnectionAnalytics = async (req: Request, res: Response): Promi
           totalQueries: parseInt(queryStats?.total_queries || '0'),
           aiQueries: parseInt(queryStats?.ai_queries || '0'),
           manualQueries: parseInt(queryStats?.manual_queries || '0'),
-          savedQueries: parseInt(queryStats?.saved_queries_count || '0'),
+          savedQueries: parseInt(savedQueriesStats?.saved_queries_count || '0'),
           errorCount: parseInt(queryStats?.error_count || '0'),
           aiSuccessRate: queryStats?.ai_queries > 0 
             ? Math.round((queryStats.ai_success_count / queryStats.ai_queries) * 100) 

@@ -2066,8 +2066,65 @@ export const executeQuery = async (req: Request, res: Response): Promise<void> =
     // Wait for job result (longer timeout for complex queries)
     const result = await waitForJobResult<any>(job, 60000);
 
-    // 3. Save to query history
-    const { saveQuery } = await import('../service/query-history.service');
+    // 3. Save to query history (single source of truth)
+    const { saveQuery, recordChatMessageExecutionResult } = await import('../service/query-history.service');
+    const { recordQueryUsage } = await import('../services/saved-queries.service');
+
+    // Limit stored raw_result to keep DB small
+    const rawResultSnapshot = {
+      rowCount: result.rowCount ?? null,
+      executionTimeMs: result.executionTime ?? null,
+      rows: Array.isArray(result.rows) ? result.rows.slice(0, 25) : [],
+    };
+
+    // If this execution came from an AI chat message, attempt to capture the prompt context
+    let aiPrompt: string | null = null;
+    let tablesUsed: string[] | undefined;
+    try {
+      if (chatMessageId) {
+        const [assistantMsg] = await sequelize.query<any>(
+          `SELECT session_id, created_at, tables_used
+           FROM chat_messages
+           WHERE id = :chatMessageId
+           LIMIT 1`,
+          { replacements: { chatMessageId }, type: QueryTypes.SELECT }
+        );
+
+        if (assistantMsg?.session_id && assistantMsg?.created_at) {
+          const [promptMsg] = await sequelize.query<any>(
+            `SELECT content
+             FROM chat_messages
+             WHERE session_id = :sessionId
+               AND role = 'user'
+               AND created_at <= :assistantCreatedAt
+             ORDER BY created_at DESC
+             LIMIT 1`,
+            {
+              replacements: {
+                sessionId: assistantMsg.session_id,
+                assistantCreatedAt: assistantMsg.created_at,
+              },
+              type: QueryTypes.SELECT,
+            }
+          );
+          if (promptMsg?.content) aiPrompt = String(promptMsg.content);
+        }
+
+        if (assistantMsg?.tables_used) {
+          // tables_used is stored as jsonb
+          try {
+            tablesUsed = Array.isArray(assistantMsg.tables_used)
+              ? assistantMsg.tables_used
+              : JSON.parse(assistantMsg.tables_used);
+          } catch {
+            // ignore
+          }
+        }
+      }
+    } catch {
+      // ignore prompt extraction failures
+    }
+
     await saveQuery({
       connectionId: id,
       userId: userId!,
@@ -2075,7 +2132,41 @@ export const executeQuery = async (req: Request, res: Response): Promise<void> =
       executionTimeMs: result.executionTime,
       rowCount: result.rowCount,
       success: true,
+      rawResult: rawResultSnapshot,
+      savedQueryId: savedQueryId || undefined,
+      chatMessageId: chatMessageId || undefined,
+      queryType,
+      isAiGenerated: !!chatMessageId,
+      aiPrompt: aiPrompt || undefined,
+      tablesUsed,
     });
+
+    // Bust cached analytics so the dashboard reflects the new query immediately
+    try {
+      await deleteCache(`connection:${id}:analytics`);
+      await deleteCache(`viewer:${userId}:connection:${id}:analytics`);
+    } catch {
+      // swallow
+    }
+
+    // Best-effort: update saved query usage stats
+    if (savedQueryId) {
+      recordQueryUsage(savedQueryId).catch(() => {
+        // swallow
+      });
+    }
+
+    // Best-effort: attach execution result back to the chat message for UI/audit
+    if (chatMessageId) {
+      recordChatMessageExecutionResult({
+        chatMessageId,
+        success: true,
+        rowCount: result.rowCount,
+        executionTimeMs: result.executionTime,
+      }).catch(() => {
+        // swallow
+      });
+    }
     
     logger.info(`[CONNECTION] Executed query (${queryType}), returned ${result.rowCount} rows in ${result.executionTime}ms`);
     res.json({
@@ -2091,16 +2182,38 @@ export const executeQuery = async (req: Request, res: Response): Promise<void> =
     try {
       const { id } = req.params;
       const userId = req.userId;
-      const { query } = req.body;
+      const { query, savedQueryId, chatMessageId } = req.body;
       if (query && userId) {
-        const { saveQuery } = await import('../service/query-history.service');
+        const { saveQuery, recordChatMessageExecutionResult } = await import('../service/query-history.service');
         await saveQuery({
           connectionId: id,
           userId: userId!,
           sqlQuery: query.trim(),
           success: false,
           errorMessage: error.message,
+          savedQueryId: savedQueryId || undefined,
+          chatMessageId: chatMessageId || undefined,
+          queryType: detectQueryType(query.trim()),
+          isAiGenerated: !!chatMessageId,
         });
+
+        // Bust cached analytics even for failures
+        try {
+          await deleteCache(`connection:${id}:analytics`);
+          await deleteCache(`viewer:${userId}:connection:${id}:analytics`);
+        } catch {
+          // swallow
+        }
+
+        if (chatMessageId) {
+          recordChatMessageExecutionResult({
+            chatMessageId,
+            success: false,
+            errorMessage: error.message,
+          }).catch(() => {
+            // swallow
+          });
+        }
       }
     } catch (historyError) {
       // Ignore history save errors

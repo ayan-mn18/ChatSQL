@@ -219,18 +219,50 @@ export const streamChatResponse = async (req: Request, res: Response): Promise<v
     // Send session info
     res.write(`data: ${JSON.stringify({ type: 'session', sessionId: currentSessionId })}\n\n`);
 
-    // Generate SQL using the AI service (non-streaming for SQL generation)
-    logger.info(`[CHAT] Generating SQL for: "${message.substring(0, 50)}..."`);
+    // Get recent chat history for context (last 10 messages, excluding the current one)
+    const chatHistory = await chatService.getChatMessages(currentSessionId, 10);
+
+    // Check if the message is requesting SQL generation
+    const sqlKeywords = [
+      'query', 'select', 'sql', 'get', 'fetch', 'show', 'find', 'list', 'retrieve',
+      'display', 'give me', 'write', 'generate', 'create query', 'database'
+    ];
+    const shouldGenerateSQL = sqlKeywords.some(keyword => 
+      message.toLowerCase().includes(keyword)
+    );
+    
+    logger.info(`[CHAT] Processing message (SQL mode: ${shouldGenerateSQL}): "${message.substring(0, 50)}..."`);
     
     let sqlResult;
     let fullContent = '';
     
     try {
-      // Use existing AI service for SQL generation
-      sqlResult = await generateSqlFromPrompt(connectionId, message.trim(), selectedSchemas);
-      
-      // Format the response as markdown
-      fullContent = formatAIResponse(sqlResult);
+      if (shouldGenerateSQL) {
+        // Use existing AI service for SQL generation
+        sqlResult = await generateSqlFromPrompt(connectionId, message.trim(), selectedSchemas);
+        
+        // Format the response as markdown
+        fullContent = formatAIResponse(sqlResult);
+      } else {
+        // Normal conversational response with chat history context
+        // Build conversation history for context
+        const conversationContext = chatHistory
+          .slice(0, -1) // Exclude the current message
+          .map(msg => `${msg.role === 'user' ? 'User' : 'Assistant'}: ${msg.content}`)
+          .join('\n');
+        
+        const conversationPrompt = `You are a helpful database assistant having a conversation with a user.
+
+Previous conversation:
+${conversationContext}
+
+Current user message: "${message}"
+
+Respond naturally and conversationally. Remember the context of previous messages. If they're asking about SQL or database queries, let them know you can help generate SQL queries. Keep your response concise and friendly.`;
+        
+        const result = await model.generateContent(conversationPrompt);
+        fullContent = result.response.text();
+      }
       
       // Stream the response in chunks to simulate typing
       const chunks = splitIntoChunks(fullContent, 50);
@@ -245,28 +277,30 @@ export const streamChatResponse = async (req: Request, res: Response): Promise<v
         sessionId: currentSessionId,
         role: 'assistant',
         content: fullContent,
-        sqlGenerated: sqlResult.query,
-        reasoning: sqlResult.reasoning,
-        tablesUsed: sqlResult.tables_used,
+        sqlGenerated: sqlResult?.query,
+        reasoning: sqlResult?.reasoning,
+        tablesUsed: sqlResult?.tables_used,
       });
 
-      // Save to query history for AI learning
-      await saveAIGeneratedQuery({
-        connectionId,
-        userId,
-        sqlQuery: sqlResult.query,
-        aiPrompt: message.trim(),
-        tablesUsed: sqlResult.tables_used,
-        columnsUsed: sqlResult.columns_used,
-      });
+      // Save to query history for AI learning (only if SQL was generated)
+      if (sqlResult) {
+        await saveAIGeneratedQuery({
+          connectionId,
+          userId,
+          sqlQuery: sqlResult.query,
+          aiPrompt: message.trim(),
+          tablesUsed: sqlResult.tables_used,
+          columnsUsed: sqlResult.columns_used,
+        });
+      }
 
       // Send completion with metadata
       res.write(`data: ${JSON.stringify({
         type: 'done',
         messageId: assistantMessage?.id,
-        sql: sqlResult.query,
-        reasoning: sqlResult.reasoning,
-        tablesUsed: sqlResult.tables_used,
+        sql: sqlResult?.query,
+        reasoning: sqlResult?.reasoning,
+        tablesUsed: sqlResult?.tables_used,
       })}\n\n`);
 
     } catch (aiError: any) {

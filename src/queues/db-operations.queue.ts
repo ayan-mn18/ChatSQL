@@ -16,7 +16,6 @@ import { sequelize } from '../config/db';
 import { decrypt } from '../utils/encryption';
 import { logger } from '../utils/logger';
 import { CACHE_KEYS, deleteCache, invalidateConnectionCache } from '../utils/cache';
-import { saveQuery } from '../service/query-history.service';
 import { logViewerActivity } from '../services/viewer-activity.service';
 
 // ============================================
@@ -748,18 +747,6 @@ async function processExecuteRawSQL(job: Job<ExecuteRawSQLJobData>): Promise<any
     
     const rowCount = Array.isArray(result) ? result.length : 0;
     
-    // Save the query to history (non-blocking)
-    saveQuery({
-      connectionId,
-      userId,
-      sqlQuery: query,
-      executionTimeMs: executionTime,
-      rowCount,
-      success: true,
-    }).catch((err: Error) => {
-      logger.warn(`[DB_OPS] Failed to save query history: ${err.message}`);
-    });
-
     logViewerActivity({
       viewerUserId: userId,
       connectionId,
@@ -780,18 +767,6 @@ async function processExecuteRawSQL(job: Job<ExecuteRawSQLJobData>): Promise<any
       executionTime,
     };
   } catch (error: any) {
-    // Save failed query to history
-    saveQuery({
-      connectionId,
-      userId,
-      sqlQuery: query,
-      executionTimeMs: 0,
-      success: false,
-      errorMessage: error.message,
-    }).catch((err: Error) => {
-      logger.warn(`[DB_OPS] Failed to save query history: ${err.message}`);
-    });
-
     logViewerActivity({
       viewerUserId: userId,
       connectionId,

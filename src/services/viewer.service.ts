@@ -3,6 +3,7 @@ import { QueryTypes } from 'sequelize';
 import { logger } from '../utils/logger';
 import { hashPassword, generateAccessToken } from '../utils/auth';
 import { sendViewerInvitationEmail } from './email.service';
+import { getFromCache, setCache, deleteCache, CACHE_TTL, CACHE_KEYS, invalidateViewerCache } from '../utils/cache';
 import crypto from 'crypto';
 
 // ============================================
@@ -393,6 +394,11 @@ export const upsertViewerByEmail = async (
     );
 
     await transaction.commit();
+    
+    // Invalidate cache for this viewer
+    await invalidateViewerCache(existing.id);
+    logger.debug(`[VIEWER] Cache invalidated for viewer ${existing.id}`);
+    
     logger.info(`✅ [VIEWER] Upserted viewer access for ${email} by admin ${adminUserId}`);
     return { viewer: updated || existing, created: false };
   } catch (error) {
@@ -527,6 +533,8 @@ export const createViewer = async (
     }
     
     await transaction.commit();
+    
+    // Note: No cache invalidation needed for new viewer - they have no cached permissions yet
     
     logger.info(`✅ [VIEWER] Created viewer ${request.email} by admin ${createdByUserId}`);
     
@@ -909,6 +917,11 @@ export const updateViewerPermissions = async (
     }
     
     await transaction.commit();
+    
+    // Invalidate cache for this viewer
+    await invalidateViewerCache(viewerId);
+    logger.debug(`[VIEWER] Cache invalidated for viewer ${viewerId}`);
+    
     logger.info(`✅ [VIEWER] Updated permissions for viewer ${viewerId}`);
     return true;
   } catch (error) {
@@ -935,17 +948,32 @@ export const getViewerConnections = async (viewerUserId: string): Promise<string
 
 /**
  * Check if viewer has access to a specific connection
+ * Cached for 5 minutes to improve performance
  */
 export const viewerHasConnectionAccess = async (
   viewerUserId: string, 
   connectionId: string
 ): Promise<boolean> => {
+  // Check cache first
+  const cacheKey = CACHE_KEYS.viewerConnectionAccess(viewerUserId, connectionId);
+  const cached = await getFromCache<boolean>(cacheKey);
+  
+  if (cached !== null) {
+    logger.debug('[VIEWER] Returning cached connection access', { viewerUserId, connectionId, hasAccess: cached.data });
+    return cached.data;
+  }
+
   const result = await sequelize.query<{ count: string }>(
     `SELECT COUNT(*) as count FROM viewer_permissions 
      WHERE viewer_user_id = :viewerUserId AND connection_id = :connectionId`,
     { replacements: { viewerUserId, connectionId }, type: QueryTypes.SELECT }
   );
-  return parseInt(result[0]?.count || '0') > 0;
+  const hasAccess = parseInt(result[0]?.count || '0') > 0;
+  
+  // Cache the result
+  await setCache(cacheKey, hasAccess, CACHE_TTL.VIEWER_PERMISSIONS);
+  
+  return hasAccess;
 };
 
 /**
@@ -964,6 +992,7 @@ export const getViewerConnectionPermissions = async (
 
 /**
  * Check if viewer can perform a specific operation on a table
+ * Cached for 5 minutes to improve performance
  */
 export const checkViewerTablePermission = async (
   viewerUserId: string,
@@ -972,6 +1001,15 @@ export const checkViewerTablePermission = async (
   tableName: string,
   operation: 'select' | 'insert' | 'update' | 'delete'
 ): Promise<boolean> => {
+  // Check cache first
+  const cacheKey = CACHE_KEYS.viewerTablePermission(viewerUserId, connectionId, schemaName, tableName, operation);
+  const cached = await getFromCache<boolean>(cacheKey);
+  
+  if (cached !== null) {
+    logger.debug('[VIEWER] Returning cached table permission', { viewerUserId, connectionId, schemaName, tableName, operation, hasPermission: cached.data });
+    return cached.data;
+  }
+
   const columnMap = {
     select: 'can_select',
     insert: 'can_insert',
@@ -998,7 +1036,12 @@ export const checkViewerTablePermission = async (
     }
   );
   
-  return result[0]?.has_permission || false;
+  const hasPermission = result[0]?.has_permission || false;
+  
+  // Cache the result
+  await setCache(cacheKey, hasPermission, CACHE_TTL.VIEWER_PERMISSIONS);
+  
+  return hasPermission;
 };
 
 /**

@@ -16,6 +16,7 @@ import { sequelize } from '../config/db';
 import { decrypt } from '../utils/encryption';
 import { logger } from '../utils/logger';
 import { TableColumnDef, IndexDef } from '../types';
+import { setCache, CACHE_TTL, CACHE_KEYS, invalidateConnectionsListCache } from '../utils/cache';
 
 // ============================================
 // SCHEMA SYNC QUEUE
@@ -218,6 +219,79 @@ export async function publishJobError(userId: string, jobId: string, connectionI
   }));
   
   logger.error(`[SCHEMA_SYNC] Published error to ${channel}`, { jobId, error });
+}
+
+// ============================================
+// CACHE WARMING - Pre-populate cache after sync
+// ============================================
+
+/**
+ * Warm the cache with schema data after sync completes
+ * This pre-populates commonly accessed data for faster subsequent requests
+ */
+async function warmSchemaCache(connectionId: string, userId: string): Promise<void> {
+  try {
+    logger.info(`[CACHE_WARM] Starting cache warming for connection ${connectionId}`);
+
+    // Fetch and cache schemas
+    const schemas = await sequelize.query<{ schema_name: string; table_count: number }>(
+      `SELECT ds.schema_name, 
+              (SELECT COUNT(*) FROM table_schemas ts WHERE ts.database_schema_id = ds.id) as table_count
+       FROM database_schemas ds 
+       WHERE ds.connection_id = $1 
+       ORDER BY ds.schema_name`,
+      { bind: [connectionId], type: QueryTypes.SELECT }
+    );
+    
+    await setCache(
+      CACHE_KEYS.schemas(connectionId),
+      schemas,
+      CACHE_TTL.SCHEMAS
+    );
+    logger.debug(`[CACHE_WARM] Cached ${schemas.length} schemas for connection ${connectionId}`);
+
+    // For each schema, fetch and cache tables
+    for (const schema of schemas) {
+      const tables = await sequelize.query<{ table_name: string; table_type: string }>(
+        `SELECT ts.table_name, ts.table_type
+         FROM table_schemas ts
+         JOIN database_schemas ds ON ts.database_schema_id = ds.id
+         WHERE ds.connection_id = $1 AND ds.schema_name = $2
+         ORDER BY ts.table_name`,
+        { bind: [connectionId, schema.schema_name], type: QueryTypes.SELECT }
+      );
+      
+      await setCache(
+        CACHE_KEYS.tables(connectionId, schema.schema_name),
+        tables,
+        CACHE_TTL.TABLES
+      );
+    }
+    logger.debug(`[CACHE_WARM] Cached tables for all schemas`);
+
+    // Fetch and cache ERD relations
+    const erdRelations = await sequelize.query(
+      `SELECT er.*
+       FROM erd_relations er
+       WHERE er.connection_id = $1`,
+      { bind: [connectionId], type: QueryTypes.SELECT }
+    );
+    
+    await setCache(
+      CACHE_KEYS.erdRelations(connectionId),
+      erdRelations,
+      CACHE_TTL.ERD_RELATIONS
+    );
+    logger.debug(`[CACHE_WARM] Cached ${erdRelations.length} ERD relations`);
+
+    // Invalidate connections list cache since schema_synced status changed
+    await invalidateConnectionsListCache(userId);
+
+    logger.info(`[CACHE_WARM] Cache warming completed for connection ${connectionId}`);
+  } catch (error) {
+    logger.warn(`[CACHE_WARM] Failed to warm cache for connection ${connectionId}:`, error);
+    // Don't throw - cache warming failure shouldn't fail the sync job
+  }
 }
 
 // ============================================
@@ -719,6 +793,9 @@ export function createSchemaSyncWorker(): Worker<SchemaSyncJobData> {
             
             const result = await processFullSchemaSync(job as Job<SyncFullSchemaJobData>, connection);
             
+            // Warm the cache with new schema data
+            await warmSchemaCache(connectionId, userId);
+            
             await publishJobComplete(userId, job.id!, connectionId, true);
             
             logger.info(`[SCHEMA_SYNC_WORKER] Full schema sync completed`, {
@@ -748,6 +825,10 @@ export function createSchemaSyncWorker(): Worker<SchemaSyncJobData> {
             // Refresh is same as full sync but we don't delete existing data first
             logger.info(`[SCHEMA_SYNC_WORKER] Refresh schema - Using full sync`);
             const refreshResult = await processFullSchemaSync(job as Job<SyncFullSchemaJobData>, connection);
+            
+            // Warm the cache with refreshed schema data
+            await warmSchemaCache(connectionId, userId);
+            
             await publishJobComplete(userId, job.id!, connectionId, true);
             return { 
               success: true, 

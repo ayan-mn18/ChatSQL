@@ -23,7 +23,8 @@ import {
   getFromCache, 
   setCache, 
   deleteCache, 
-  invalidateConnectionCache, 
+  invalidateConnectionCache,
+  invalidateConnectionsListCache,
   CACHE_KEYS, 
   CACHE_TTL 
 } from '../utils/cache';
@@ -391,7 +392,11 @@ export const createConnection = async (req: Request, res: Response): Promise<voi
       jobId: job.id
     });
 
-    // Step 6: Return connection (without password)
+    // Step 6: Invalidate connections list cache
+    await invalidateConnectionsListCache(userId);
+    logger.debug('[CONNECTION] Connections list cache invalidated', { userId });
+
+    // Step 7: Return connection (without password)
     const response: ApiResponse<{ connection: ConnectionPublic; jobId: string | undefined }> = {
       success: true,
       message: 'Connection created successfully. Schema sync job queued.',
@@ -419,10 +424,11 @@ export const createConnection = async (req: Request, res: Response): Promise<voi
  * 
  * STEPS:
  * 1. Get user_id from JWT (req.userId)
- * 2. Check user role (super_admin sees own connections, viewer sees permitted connections)
- * 3. Query connections table accordingly
- * 4. Return list of connections (WITHOUT passwords)
- * 5. Include schema_synced status and last_tested_at
+ * 2. Check cache first
+ * 3. Check user role (super_admin sees own connections, viewer sees permitted connections)
+ * 4. Query connections table accordingly
+ * 5. Cache and return list of connections (WITHOUT passwords)
+ * 6. Include schema_synced status and last_tested_at
  */
 export const getAllConnections = async (req: Request, res: Response): Promise<void> => {
   try {
@@ -439,6 +445,22 @@ export const getAllConnections = async (req: Request, res: Response): Promise<vo
     }
 
     logger.info('[CONNECTION] Get all connections request', { userId, userRole });
+
+    // Check cache first
+    const cacheKey = CACHE_KEYS.connectionsList(userId);
+    const cached = await getFromCache<ConnectionPublic[]>(cacheKey);
+    
+    if (cached) {
+      logger.info(`[CONNECTION] Returning cached connections list for user: ${userId}`);
+      res.status(200).json({
+        success: true,
+        data: cached.data,
+        count: cached.data.length,
+        cached: true,
+        cachedAt: cached.cachedAt
+      });
+      return;
+    }
 
     let connections: ConnectionPublic[];
     
@@ -475,10 +497,14 @@ export const getAllConnections = async (req: Request, res: Response): Promise<vo
 
     logger.info(`[CONNECTION] Found ${connections.length} connections for user`, { userId, userRole });
 
+    // Cache the result
+    await setCache(cacheKey, connections, CACHE_TTL.CONNECTIONS_LIST);
+
     res.status(200).json({
       success: true,
       data: connections,
-      count: connections.length
+      count: connections.length,
+      cached: false
     });
   } catch (error: any) {
     logger.error('[CONNECTION] Get all connections failed:', error);
@@ -823,6 +849,10 @@ export const updateConnection = async (req: Request, res: Response): Promise<voi
 
     logger.info('[CONNECTION] Connection updated successfully', { connectionId: id });
 
+    // Invalidate connections list cache
+    await invalidateConnectionsListCache(userId);
+    logger.debug('[CONNECTION] Connections list cache invalidated', { userId });
+
     res.status(200).json({
       success: true,
       message: databaseChanged 
@@ -935,6 +965,10 @@ export const deleteConnection = async (req: Request, res: Response): Promise<voi
     }
 
     logger.info('[CONNECTION] Connection deleted successfully', { id, name: connectionName });
+
+    // Invalidate connections list cache
+    await invalidateConnectionsListCache(userId);
+    logger.debug('[CONNECTION] Connections list cache invalidated', { userId });
 
     res.status(200).json({
       success: true,
@@ -2800,7 +2834,25 @@ export const getTableColumns = async (req: Request, res: Response): Promise<void
       return;
     }
     
-    // 2. Get columns from table_schemas
+    // 2. Check cache first
+    const cacheKey = CACHE_KEYS.tableColumns(id, schema, table);
+    const cached = await getFromCache<{ columns: any; primaryKey: string }>(cacheKey);
+    
+    if (cached) {
+      logger.info(`[CONNECTION] Returning cached columns for ${schema}.${table}`);
+      res.json({
+        success: true,
+        columns: cached.data.columns,
+        primaryKey: cached.data.primaryKey,
+        schemaName: schema,
+        tableName: table,
+        cached: true,
+        cachedAt: cached.cachedAt
+      });
+      return;
+    }
+    
+    // 3. Get columns from table_schemas
     const [tableRow] = await sequelize.query<{ columns: any; primary_key_columns: string[] | null }>(
       `SELECT ts.columns, ts.primary_key_columns
        FROM table_schemas ts
@@ -2826,12 +2878,16 @@ export const getTableColumns = async (req: Request, res: Response): Promise<void
     // Extract first primary key column, default to 'id'
     const primaryKey = tableRow.primary_key_columns?.[0] || 'id';
     
+    // 4. Cache the result
+    await setCache(cacheKey, { columns: tableRow.columns, primaryKey }, CACHE_TTL.TABLE_COLUMNS);
+    
     res.json({
       success: true,
       columns: tableRow.columns,
       primaryKey,
       schemaName: schema,
-      tableName: table
+      tableName: table,
+      cached: false
     });
   } catch (error: any) {
     logger.error('[CONNECTION] Get table columns failed:', error);

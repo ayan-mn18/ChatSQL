@@ -8,16 +8,71 @@ import { logger } from './logger';
 
 // Cache TTL settings (in seconds)
 export const CACHE_TTL = {
-  SCHEMAS: 5 * 60,      // 5 minutes for schema list
-  TABLES: 5 * 60,       // 5 minutes for tables in a schema
-  CONNECTION: 5 * 60,   // 5 minutes for connection details
+  // Schema & Table metadata (stable, rarely changes)
+  SCHEMAS: 30 * 60,           // 30 minutes for schema list
+  TABLES: 30 * 60,            // 30 minutes for tables in a schema
+  TABLE_COLUMNS: 30 * 60,     // 30 minutes for table columns/structure
+  ERD_RELATIONS: 30 * 60,     // 30 minutes for ERD relationships
+  
+  // Connection data
+  CONNECTION: 10 * 60,        // 10 minutes for connection details
+  CONNECTIONS_LIST: 5 * 60,   // 5 minutes for user's connections list
+  
+  // Table row data (changes frequently)
+  TABLE_DATA: 60,             // 1 minute for actual table data
+  
+  // Analytics
+  ANALYTICS: 60,              // 1 minute for connection analytics
+  WORKSPACE_ANALYTICS: 2 * 60, // 2 minutes for workspace analytics
+  
+  // Permissions (moderate TTL, invalidated on change)
+  VIEWER_PERMISSIONS: 5 * 60, // 5 minutes for viewer permissions
+  
+  // AI operations
+  AI_RESULT: 5 * 60,          // 5 minutes for AI job results
+  AI_CONTEXT: 60 * 60,        // 1 hour for AI schema context (compressed DDL)
 };
 
 // Cache key prefixes
 export const CACHE_KEYS = {
+  // Schema & Tables
   schemas: (connectionId: string) => `connection:${connectionId}:schemas`,
   tables: (connectionId: string, schemaName: string) => `connection:${connectionId}:schema:${schemaName}:tables`,
   allTables: (connectionId: string) => `connection:${connectionId}:all-tables`,
+  tableColumns: (connectionId: string, schemaName: string, tableName: string) => 
+    `connection:${connectionId}:schema:${schemaName}:table:${tableName}:columns`,
+  erdRelations: (connectionId: string) => `connection:${connectionId}:relations`,
+  
+  // Connection
+  connection: (connectionId: string) => `connection:${connectionId}:details`,
+  connectionsList: (userId: string) => `user:${userId}:connections`,
+  
+  // Table data (paginated)
+  tableData: (connectionId: string, schema: string, table: string, page: number, pageSize: number, sortKey: string) =>
+    `connection:${connectionId}:data:${schema}:${table}:p${page}:s${pageSize}:${sortKey}`,
+  
+  // Analytics
+  analytics: (connectionId: string) => `connection:${connectionId}:analytics`,
+  workspaceAnalytics: (userId: string) => `user:${userId}:workspace:analytics`,
+  
+  // Viewer permission checks (for caching access/permission results)
+  viewerConnectionAccess: (userId: string, connectionId: string) => 
+    `viewer:${userId}:connection:${connectionId}:access`,
+  viewerTablePermission: (userId: string, connectionId: string, schemaName: string, tableName: string, operation: string) => 
+    `viewer:${userId}:connection:${connectionId}:schema:${schemaName}:table:${tableName}:${operation}`,
+  
+  // Viewer-specific (permission-filtered data)
+  viewerSchemas: (userId: string, connectionId: string) => 
+    `viewer:${userId}:connection:${connectionId}:schemas`,
+  viewerTables: (userId: string, connectionId: string, schemaName: string) => 
+    `viewer:${userId}:connection:${connectionId}:schema:${schemaName}:tables`,
+  viewerPermissions: (userId: string, connectionId: string) => 
+    `viewer:${userId}:connection:${connectionId}:permissions`,
+  viewerAllPermissions: (userId: string) => `viewer:${userId}:all-permissions`,
+  
+  // AI
+  aiResult: (jobId: string) => `ai_result:${jobId}`,
+  aiContext: (connectionId: string) => `connection:${connectionId}:ai-context`,
 };
 
 /**
@@ -113,6 +168,42 @@ export async function invalidateSchemaCache(connectionId: string, schemaName: st
     logger.info(`[CACHE] Invalidated cache for schema: ${schemaName} in connection: ${connectionId}`);
   } catch (error: any) {
     logger.error(`[CACHE] Error invalidating schema cache:`, error);
+  }
+}
+
+/**
+ * Invalidate all viewer-specific caches for a user
+ */
+export async function invalidateViewerCache(userId: string, connectionId?: string): Promise<void> {
+  try {
+    const redis = getRedisClient();
+    
+    // Pattern to match viewer caches
+    const pattern = connectionId 
+      ? `viewer:${userId}:connection:${connectionId}:*`
+      : `viewer:${userId}:*`;
+    
+    const keys = await redis.keys(pattern);
+    
+    if (keys.length > 0) {
+      await redis.del(...keys);
+      logger.info(`[CACHE] Invalidated ${keys.length} viewer cache keys for user: ${userId}`);
+    }
+  } catch (error: any) {
+    logger.error(`[CACHE] Error invalidating viewer cache:`, error);
+  }
+}
+
+/**
+ * Invalidate user's connections list cache
+ */
+export async function invalidateConnectionsListCache(userId: string): Promise<void> {
+  try {
+    const key = CACHE_KEYS.connectionsList(userId);
+    await deleteCache(key);
+    logger.info(`[CACHE] Invalidated connections list cache for user: ${userId}`);
+  } catch (error: any) {
+    logger.error(`[CACHE] Error invalidating connections list cache:`, error);
   }
 }
 

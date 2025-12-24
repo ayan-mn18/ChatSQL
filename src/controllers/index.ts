@@ -1,5 +1,6 @@
 export * as authController from './auth.controller';
 export * as connectionController from './connection.controller';
+export * as usageController from './usage.controller';
 
 // Future controllers - uncomment when implemented
 // export * as queryController from './query.controller';

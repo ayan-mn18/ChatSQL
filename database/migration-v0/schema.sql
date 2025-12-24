@@ -568,6 +568,191 @@ $$ LANGUAGE plpgsql;
 -- SETUP COMPLETE
 -- ============================================
 
+-- ============================================
+-- USER PLANS TABLE
+-- Subscription plans and usage limits for users
+-- ============================================
+CREATE TABLE IF NOT EXISTS user_plans (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    plan_type VARCHAR(50) NOT NULL DEFAULT 'free',  -- 'free', 'pro', 'enterprise'
+    ai_tokens_limit INTEGER DEFAULT 10000,           -- Monthly AI token limit
+    ai_tokens_used INTEGER DEFAULT 0,                -- Current month usage
+    queries_limit INTEGER DEFAULT 1000,              -- Monthly query limit
+    queries_used INTEGER DEFAULT 0,                  -- Current month usage
+    connections_limit INTEGER DEFAULT 3,             -- Max connections allowed
+    storage_limit_mb INTEGER DEFAULT 100,            -- Storage limit in MB
+    billing_cycle_start TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    billing_cycle_end TIMESTAMP WITH TIME ZONE DEFAULT (CURRENT_TIMESTAMP + INTERVAL '1 month'),
+    is_active BOOLEAN DEFAULT TRUE,
+    stripe_customer_id VARCHAR(255),
+    stripe_subscription_id VARCHAR(255),
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT unique_user_plan UNIQUE (user_id)
+);
+
+-- Indexes for user_plans
+CREATE INDEX IF NOT EXISTS idx_user_plans_user_id ON user_plans(user_id);
+CREATE INDEX IF NOT EXISTS idx_user_plans_plan_type ON user_plans(plan_type);
+CREATE INDEX IF NOT EXISTS idx_user_plans_billing_end ON user_plans(billing_cycle_end);
+
+-- Trigger for user_plans
+DROP TRIGGER IF EXISTS update_user_plans_updated_at ON user_plans;
+CREATE TRIGGER update_user_plans_updated_at
+    BEFORE UPDATE ON user_plans
+    FOR EACH ROW
+    EXECUTE FUNCTION update_updated_at_column();
+
+-- ============================================
+-- AI TOKEN USAGE TABLE
+-- Granular tracking of AI token consumption
+-- ============================================
+CREATE TABLE IF NOT EXISTS ai_token_usage (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    connection_id UUID REFERENCES connections(id) ON DELETE SET NULL,
+    operation_type VARCHAR(50) NOT NULL,  -- 'generate_sql', 'explain_query', 'chat', 'schema_analysis'
+    model VARCHAR(100),                    -- e.g., 'gemini-2.0-flash'
+    input_tokens INTEGER DEFAULT 0,
+    output_tokens INTEGER DEFAULT 0,
+    total_tokens INTEGER DEFAULT 0,
+    prompt_preview TEXT,                   -- First 200 chars of prompt for debugging
+    response_preview TEXT,                 -- First 200 chars of response
+    execution_time_ms INTEGER,
+    is_cached BOOLEAN DEFAULT FALSE,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Indexes for ai_token_usage
+CREATE INDEX IF NOT EXISTS idx_ai_token_usage_user_id ON ai_token_usage(user_id);
+CREATE INDEX IF NOT EXISTS idx_ai_token_usage_user_date ON ai_token_usage(user_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_ai_token_usage_connection_id ON ai_token_usage(connection_id);
+CREATE INDEX IF NOT EXISTS idx_ai_token_usage_operation ON ai_token_usage(operation_type);
+CREATE INDEX IF NOT EXISTS idx_ai_token_usage_created ON ai_token_usage(created_at DESC);
+
+-- ============================================
+-- PLAN CONFIGURATIONS TABLE
+-- Defines available plan tiers and their limits
+-- ============================================
+CREATE TABLE IF NOT EXISTS plan_configurations (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    plan_type VARCHAR(50) UNIQUE NOT NULL,
+    display_name VARCHAR(100) NOT NULL,
+    description TEXT,
+    price_monthly DECIMAL(10, 2) DEFAULT 0,
+    price_yearly DECIMAL(10, 2) DEFAULT 0,
+    ai_tokens_limit INTEGER NOT NULL,
+    queries_limit INTEGER NOT NULL,
+    connections_limit INTEGER NOT NULL,
+    storage_limit_mb INTEGER NOT NULL,
+    features JSONB DEFAULT '[]',           -- List of feature flags
+    is_active BOOLEAN DEFAULT TRUE,
+    sort_order INTEGER DEFAULT 0,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Trigger for plan_configurations
+DROP TRIGGER IF EXISTS update_plan_configurations_updated_at ON plan_configurations;
+CREATE TRIGGER update_plan_configurations_updated_at
+    BEFORE UPDATE ON plan_configurations
+    FOR EACH ROW
+    EXECUTE FUNCTION update_updated_at_column();
+
+-- ============================================
+-- INSERT DEFAULT PLAN CONFIGURATIONS
+-- ============================================
+INSERT INTO plan_configurations (plan_type, display_name, description, price_monthly, price_yearly, ai_tokens_limit, queries_limit, connections_limit, storage_limit_mb, features, sort_order)
+VALUES 
+    ('free', 'Free', 'Perfect for getting started with ChatSQL', 0, 0, 10000, 1000, 3, 100, 
+     '["Basic AI SQL generation", "3 database connections", "Query history (7 days)", "Community support"]'::jsonb, 1),
+    ('pro', 'Pro', 'For professionals who need more power', 19.99, 199.99, 100000, 10000, 10, 1000,
+     '["Advanced AI features", "10 database connections", "Query history (90 days)", "Priority support", "Custom saved queries", "Export to CSV/JSON"]'::jsonb, 2),
+    ('enterprise', 'Enterprise', 'For teams with advanced needs', 49.99, 499.99, -1, -1, -1, -1,
+     '["Unlimited AI tokens", "Unlimited connections", "Unlimited query history", "24/7 support", "Team collaboration", "SSO/SAML", "Audit logs", "Custom integrations"]'::jsonb, 3)
+ON CONFLICT (plan_type) DO NOTHING;
+
+-- ============================================
+-- FUNCTION: Create default plan for new user
+-- ============================================
+CREATE OR REPLACE FUNCTION create_default_user_plan()
+RETURNS TRIGGER AS $$
+BEGIN
+    INSERT INTO user_plans (user_id, plan_type, ai_tokens_limit, queries_limit, connections_limit, storage_limit_mb)
+    SELECT NEW.id, 'free', ai_tokens_limit, queries_limit, connections_limit, storage_limit_mb
+    FROM plan_configurations
+    WHERE plan_type = 'free'
+    ON CONFLICT (user_id) DO NOTHING;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Trigger to auto-create plan for new users
+DROP TRIGGER IF EXISTS create_user_plan_trigger ON users;
+CREATE TRIGGER create_user_plan_trigger
+    AFTER INSERT ON users
+    FOR EACH ROW
+    EXECUTE FUNCTION create_default_user_plan();
+
+-- ============================================
+-- FUNCTION: Reset monthly usage counters
+-- Call this via cron job at billing cycle end
+-- ============================================
+CREATE OR REPLACE FUNCTION reset_monthly_usage()
+RETURNS void AS $$
+BEGIN
+    UPDATE user_plans
+    SET 
+        ai_tokens_used = 0,
+        queries_used = 0,
+        billing_cycle_start = CURRENT_TIMESTAMP,
+        billing_cycle_end = CURRENT_TIMESTAMP + INTERVAL '1 month'
+    WHERE billing_cycle_end < CURRENT_TIMESTAMP;
+END;
+$$ LANGUAGE plpgsql;
+
+-- ============================================
+-- FUNCTION: Get user usage dashboard data
+-- ============================================
+CREATE OR REPLACE FUNCTION get_user_usage_dashboard(p_user_id UUID)
+RETURNS TABLE (
+    plan_type VARCHAR(50),
+    plan_display_name VARCHAR(100),
+    ai_tokens_limit INTEGER,
+    ai_tokens_used INTEGER,
+    ai_tokens_remaining INTEGER,
+    queries_limit INTEGER,
+    queries_used INTEGER,
+    queries_remaining INTEGER,
+    connections_limit INTEGER,
+    connections_used BIGINT,
+    billing_cycle_start TIMESTAMP WITH TIME ZONE,
+    billing_cycle_end TIMESTAMP WITH TIME ZONE,
+    days_remaining INTEGER
+) AS $$
+BEGIN
+    RETURN QUERY
+    SELECT 
+        up.plan_type,
+        pc.display_name AS plan_display_name,
+        up.ai_tokens_limit,
+        up.ai_tokens_used,
+        CASE WHEN up.ai_tokens_limit = -1 THEN -1 ELSE GREATEST(0, up.ai_tokens_limit - up.ai_tokens_used) END AS ai_tokens_remaining,
+        up.queries_limit,
+        up.queries_used,
+        CASE WHEN up.queries_limit = -1 THEN -1 ELSE GREATEST(0, up.queries_limit - up.queries_used) END AS queries_remaining,
+        up.connections_limit,
+        (SELECT COUNT(*) FROM connections c WHERE c.user_id = p_user_id) AS connections_used,
+        up.billing_cycle_start,
+        up.billing_cycle_end,
+        EXTRACT(DAY FROM (up.billing_cycle_end - CURRENT_TIMESTAMP))::INTEGER AS days_remaining
+    FROM user_plans up
+    JOIN plan_configurations pc ON up.plan_type = pc.plan_type
+    WHERE up.user_id = p_user_id;
+END;
+$$ LANGUAGE plpgsql;
+
 -- Verify all tables were created
 SELECT 
     schemaname, 

@@ -3,7 +3,7 @@ import { sequelize } from '../config/db';
 import { decrypt } from '../utils/encryption';
 import { getRedisClient } from '../config/redis';
 import { logger } from '../utils/logger';
-import { generateGeminiText } from './gemini.client';
+import { generateGeminiText, generateGeminiTextWithUsage, getActiveModelName, type TokenUsage, type GeminiResponse } from './gemini.client';
 import {
   buildExplainSqlPrompt,
   buildExtractRelevantMetadataPrompt,
@@ -64,6 +64,115 @@ export interface GenerateSqlResult {
   tables_used: string[];
   columns_used: string[];
   desc: string;
+  tokenUsage?: TokenUsage;
+}
+
+// ============================================
+// TOKEN USAGE LOGGING
+// ============================================
+
+/**
+ * Log AI token usage to database
+ */
+export async function logTokenUsage(
+  userId: string,
+  connectionId: string | null,
+  operationType: 'generate_sql' | 'explain_query' | 'chat' | 'schema_analysis' | 'extract_metadata',
+  tokenUsage: TokenUsage,
+  model: string,
+  promptPreview?: string,
+  responsePreview?: string,
+  executionTimeMs?: number
+): Promise<void> {
+  try {
+    // Log token usage
+    await sequelize.query(
+      `INSERT INTO ai_token_usage 
+       (user_id, connection_id, operation_type, model, input_tokens, output_tokens, total_tokens, 
+        prompt_preview, response_preview, execution_time_ms)
+       VALUES (:userId, :connectionId, :operationType, :model, :inputTokens, :outputTokens, :totalTokens,
+               :promptPreview, :responsePreview, :executionTimeMs)`,
+      {
+        replacements: {
+          userId,
+          connectionId,
+          operationType,
+          model,
+          inputTokens: tokenUsage.inputTokens,
+          outputTokens: tokenUsage.outputTokens,
+          totalTokens: tokenUsage.totalTokens,
+          promptPreview: promptPreview?.substring(0, 200) || null,
+          responsePreview: responsePreview?.substring(0, 200) || null,
+          executionTimeMs: executionTimeMs || null,
+        },
+        type: QueryTypes.INSERT,
+      }
+    );
+
+    // Update user's token usage in their plan
+    await sequelize.query(
+      `UPDATE user_plans 
+       SET ai_tokens_used = ai_tokens_used + :totalTokens,
+           updated_at = CURRENT_TIMESTAMP
+       WHERE user_id = :userId`,
+      {
+        replacements: {
+          userId,
+          totalTokens: tokenUsage.totalTokens,
+        },
+        type: QueryTypes.UPDATE,
+      }
+    );
+
+    logger.debug(`[AI_SERVICE] Logged ${tokenUsage.totalTokens} tokens for user ${userId} (${operationType})`);
+  } catch (error: any) {
+    // Don't fail the main operation if logging fails
+    logger.error(`[AI_SERVICE] Failed to log token usage: ${error.message}`);
+  }
+}
+
+/**
+ * Check if user has remaining AI tokens
+ */
+export async function checkUserTokenLimit(userId: string): Promise<{
+  allowed: boolean;
+  remaining: number;
+  limit: number;
+  used: number;
+}> {
+  try {
+    const [result] = await sequelize.query<any>(
+      `SELECT ai_tokens_limit, ai_tokens_used 
+       FROM user_plans 
+       WHERE user_id = :userId`,
+      {
+        replacements: { userId },
+        type: QueryTypes.SELECT,
+      }
+    );
+
+    if (!result) {
+      // No plan found, allow with default limits
+      return { allowed: true, remaining: 10000, limit: 10000, used: 0 };
+    }
+
+    const limit = result.ai_tokens_limit;
+    const used = result.ai_tokens_used;
+    
+    // -1 means unlimited
+    if (limit === -1) {
+      return { allowed: true, remaining: -1, limit: -1, used };
+    }
+
+    const remaining = Math.max(0, limit - used);
+    const allowed = remaining > 0;
+
+    return { allowed, remaining, limit, used };
+  } catch (error: any) {
+    logger.error(`[AI_SERVICE] Failed to check token limit: ${error.message}`);
+    // Allow operation if check fails
+    return { allowed: true, remaining: 10000, limit: 10000, used: 0 };
+  }
 }
 
 // ============================================
@@ -310,8 +419,10 @@ export async function generateSqlFromPrompt(
   selectedSchemas: string[],
   options?: {
     chatHistory?: ChatMessage[];
+    userId?: string;
   }
 ): Promise<GenerateSqlResult> {
+  const startTime = Date.now();
   logger.info(`[AI_SERVICE] Generating SQL for: "${prompt.substring(0, 50)}..."`);
   
   // Get database metadata
@@ -334,7 +445,7 @@ export async function generateSqlFromPrompt(
   
   logger.debug(`[AI_SERVICE] Relevant metadata extracted, query history: ${recentQueries.length} recent, ${aiQueries.length} AI-generated`);
   
-  // Generate SQL
+  // Generate SQL with token tracking
   const sqlPrompt = buildSqlGenerationPrompt({
     fullSchemaJson: metadataStr,
     relevantSchemaJson: relevantMetadata,
@@ -343,15 +454,34 @@ export async function generateSqlFromPrompt(
     userRequest: prompt,
   });
 
-  const aiResponse = await generateGeminiText({
+  const response = await generateGeminiTextWithUsage({
     contents: [{ role: 'user', parts: [{ text: sqlPrompt }] }],
     generationConfig: {
       temperature: 0.1,
     },
   });
   
+  const executionTime = Date.now() - startTime;
+  
+  // Log token usage if userId provided
+  if (options?.userId) {
+    await logTokenUsage(
+      options.userId,
+      connectionId,
+      'generate_sql',
+      response.tokenUsage,
+      response.model,
+      prompt,
+      response.text?.substring(0, 200),
+      executionTime
+    );
+  }
+  
   // Parse and sanitize the response
-  return parseAIResponse(aiResponse || '');
+  const result = parseAIResponse(response.text || '');
+  result.tokenUsage = response.tokenUsage;
+  
+  return result;
 }
 
 /**
@@ -406,8 +536,10 @@ function parseAIResponse(aiResponse: string): GenerateSqlResult {
  */
 export async function explainSqlQuery(
   connectionId: string,
-  sql: string
+  sql: string,
+  userId?: string
 ): Promise<string> {
+  const startTime = Date.now();
   logger.info(`[AI_SERVICE] Explaining SQL query`);
   
   // Get schema context for better explanation
@@ -418,14 +550,30 @@ export async function explainSqlQuery(
     sql,
   });
 
-  const text = await generateGeminiText({
+  const response = await generateGeminiTextWithUsage({
     contents: [{ role: 'user', parts: [{ text: prompt }] }],
     generationConfig: {
       temperature: 0.3,
     },
   });
 
-  return text || 'Unable to generate explanation';
+  const executionTime = Date.now() - startTime;
+
+  // Log token usage if userId provided
+  if (userId) {
+    await logTokenUsage(
+      userId,
+      connectionId,
+      'explain_query',
+      response.tokenUsage,
+      response.model,
+      sql.substring(0, 200),
+      response.text?.substring(0, 200),
+      executionTime
+    );
+  }
+
+  return response.text || 'Unable to generate explanation';
 }
 
 /**

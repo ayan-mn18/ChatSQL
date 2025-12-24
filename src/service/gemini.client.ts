@@ -4,6 +4,21 @@ import { GOOGLE_AI_MODEL } from '../config/env';
 
 type GenerateContentRequest = Parameters<ReturnType<GoogleGenerativeAI['getGenerativeModel']>['generateContent']>[0];
 
+// Token usage metadata from Gemini response
+export interface TokenUsage {
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+}
+
+// Extended response with token tracking
+export interface GeminiResponse {
+  text: string;
+  tokenUsage: TokenUsage;
+  model: string;
+  cached: boolean;
+}
+
 function isModelUnsupportedError(err: unknown): boolean {
   const message = (err as any)?.message ?? String(err);
   return (
@@ -46,6 +61,33 @@ function getModel(modelName: string) {
   return genAI.getGenerativeModel({ model: modelName });
 }
 
+// Extract token usage from Gemini response
+function extractTokenUsage(response: any): TokenUsage {
+  try {
+    const usageMetadata = response?.response?.usageMetadata;
+    if (usageMetadata) {
+      return {
+        inputTokens: usageMetadata.promptTokenCount || 0,
+        outputTokens: usageMetadata.candidatesTokenCount || 0,
+        totalTokens: usageMetadata.totalTokenCount || 0,
+      };
+    }
+  } catch (err) {
+    logger.warn('[GEMINI] Failed to extract token usage:', err);
+  }
+  
+  // Fallback: estimate tokens (rough approximation: ~4 chars per token)
+  return {
+    inputTokens: 0,
+    outputTokens: 0,
+    totalTokens: 0,
+  };
+}
+
+export function getActiveModelName(): string {
+  return activeModelName;
+}
+
 export async function generateGeminiContent(request: GenerateContentRequest) {
   let lastError: unknown;
 
@@ -72,7 +114,27 @@ export async function generateGeminiContent(request: GenerateContentRequest) {
   throw lastError;
 }
 
+// Original text-only function (kept for backward compatibility)
 export async function generateGeminiText(request: GenerateContentRequest): Promise<string> {
   const result = await generateGeminiContent(request);
   return result?.response?.text?.() || '';
+}
+
+// New function that returns text with token usage
+export async function generateGeminiTextWithUsage(request: GenerateContentRequest): Promise<GeminiResponse> {
+  const startTime = Date.now();
+  const result = await generateGeminiContent(request);
+  const elapsed = Date.now() - startTime;
+  
+  const text = result?.response?.text?.() || '';
+  const tokenUsage = extractTokenUsage(result);
+  
+  logger.info(`[GEMINI] Generated response in ${elapsed}ms | Tokens: ${tokenUsage.totalTokens} (in: ${tokenUsage.inputTokens}, out: ${tokenUsage.outputTokens}) | Model: ${activeModelName}`);
+  
+  return {
+    text,
+    tokenUsage,
+    model: activeModelName,
+    cached: false,
+  };
 }

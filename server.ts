@@ -12,7 +12,7 @@ import { Sequelize } from 'sequelize';
 import { connectDatabase } from './src/config/db';
 
 // Import routes
-import { authRoutes, connectionRoutes, jobsRoutes, adminRoutes, aiRoutes, viewerRoutes, savedQueriesRoutes, chatRoutes } from './src/routes';
+import { authRoutes, connectionRoutes, jobsRoutes, adminRoutes, aiRoutes, viewerRoutes, savedQueriesRoutes, chatRoutes, usageRoutes } from './src/routes';
 
 // Import middleware
 import { errorHandler, notFoundHandler, globalRateLimit } from './src/middleware';
@@ -260,6 +260,9 @@ app.use('/api/connections', savedQueriesRoutes);
 
 // Chat routes (AI chat sessions)
 app.use('/api/chat', chatRoutes);
+
+// Usage routes (plans, tokens, usage dashboard)
+app.use('/api/usage', usageRoutes);
 
 // Future routes - uncomment when implemented
 // app.use('/api/query', queryRoutes);

@@ -1121,7 +1121,7 @@ export const getSchemas = async (req: Request, res: Response): Promise<void> => 
       logger.info(`[CONNECTION] Returning cached schemas for connection: ${id}`);
       res.json({
         success: true,
-        schemas: cached.data,
+        data: cached.data,
         total_schemas: cached.data.length,
         cached: true,
         cachedAt: cached.cachedAt
@@ -1164,7 +1164,7 @@ export const getSchemas = async (req: Request, res: Response): Promise<void> => 
     logger.info(`[CONNECTION] Fetched ${schemas.length} schemas for connection: ${id}`);
     res.json({
       success: true,
-      schemas,
+      data: schemas,
       total_schemas: schemas.length,
       cached: false
     });
@@ -1357,7 +1357,7 @@ export const getTablesBySchema = async (req: Request, res: Response): Promise<vo
       res.json({
         success: true,
         schema_name: schemaName,
-        tables: cached.data,
+        data: cached.data,
         total_tables: cached.data.length,
         cached: true,
         cachedAt: cached.cachedAt
@@ -1408,7 +1408,7 @@ export const getTablesBySchema = async (req: Request, res: Response): Promise<vo
     res.json({
       success: true,
       schema_name: schemaName,
-      tables,
+      data: tables,
       total_tables: tables.length,
       cached: false
     });
@@ -1476,7 +1476,7 @@ export const getRelations = async (req: Request, res: Response): Promise<void> =
       logger.info(`[CONNECTION] Returning cached ERD relations for connection: ${id}`);
       res.json({
         success: true,
-        relations: cached.data,
+        data: cached.data,
         total_relations: cached.data.length,
         cached: true,
         cachedAt: cached.cachedAt
@@ -1513,7 +1513,7 @@ export const getRelations = async (req: Request, res: Response): Promise<void> =
     logger.info(`[CONNECTION] Fetched ${relations.length} ERD relations for connection: ${id}`);
     res.json({
       success: true,
-      relations,
+      data: relations,
       total_relations: relations.length,
       cached: false
     });

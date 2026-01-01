@@ -48,7 +48,7 @@ export const generateSql = async (req: Request, res: Response): Promise<void> =>
         );
         if (!permissions[0]?.can_use_ai) {
           hasAccess = false;
-        }
+        } 
       }
     } else {
       const [connectionResult] = await sequelize.query<{ id: string }>(

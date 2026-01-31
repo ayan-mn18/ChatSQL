@@ -14,7 +14,8 @@
 -- ============================================
 
 -- First, update existing plans and add new ones
-TRUNCATE TABLE plan_configurations CASCADE;
+-- Note: Removed TRUNCATE to preserve existing subscriptions
+-- TRUNCATE TABLE plan_configurations CASCADE;
 
 INSERT INTO plan_configurations (
     plan_type, 
@@ -35,16 +36,20 @@ INSERT INTO plan_configurations (
      '["Basic AI SQL generation", "2 database connections", "Query history (7 days)", "Community support", "Read-only after limits"]'::jsonb, 1, true),
     
     -- Pro Monthly ($10/mo)
-    ('pro', 'Pro', 'For professionals who need more power', 10.00, 100.00, 100000, 5000, 10, 500,
+    ('pro_monthly', 'Pro Monthly', 'For professionals who need more power - Monthly billing', 10.00, 10.00, 100000, 5000, 10, 500,
      '["Advanced AI features", "10 database connections", "Query history (90 days)", "Priority email support", "Custom saved queries", "Export to CSV/JSON", "No read-only restrictions"]'::jsonb, 2, true),
+    
+    -- Pro Yearly ($96/year = $8/mo)
+    ('pro_yearly', 'Pro Yearly', 'For professionals who need more power - Yearly billing', 8.00, 96.00, 100000, 5000, 10, 500,
+     '["Advanced AI features", "10 database connections", "Query history (90 days)", "Priority email support", "Custom saved queries", "Export to CSV/JSON", "No read-only restrictions", "2 months free compared to monthly"]'::jsonb, 3, true),
     
     -- Lifetime ($100 one-time payment)
     ('lifetime', 'Lifetime', 'One-time payment, lifetime access', 100.00, 100.00, -1, -1, 50, 5000,
-     '["Unlimited AI tokens", "50 database connections", "Unlimited query history", "Priority support", "All Pro features", "Future updates included", "No recurring fees"]'::jsonb, 3, true),
+     '["Unlimited AI tokens", "50 database connections", "Unlimited query history", "Priority support", "All Pro features", "Future updates included", "No recurring fees"]'::jsonb, 4, true),
     
     -- Enterprise (Contact Us)
     ('enterprise', 'Enterprise', 'For teams with advanced needs - Contact us for pricing', 0, 0, -1, -1, -1, -1,
-     '["Unlimited everything", "Dedicated support", "24/7 support", "Team collaboration", "SSO/SAML", "Audit logs", "Custom integrations", "SLA guarantee", "On-premise option"]'::jsonb, 4, true)
+     '["Unlimited everything", "Dedicated support", "24/7 support", "Team collaboration", "SSO/SAML", "Audit logs", "Custom integrations", "SLA guarantee", "On-premise option"]'::jsonb, 5, true)
 ON CONFLICT (plan_type) DO UPDATE SET
     display_name = EXCLUDED.display_name,
     description = EXCLUDED.description,

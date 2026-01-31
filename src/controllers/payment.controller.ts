@@ -267,7 +267,9 @@ export const handleWebhook = async (req: Request, res: Response): Promise<void> 
 
       case 'subscription.renewed':
       case 'subscription_renewed': {
-        const { subscription_id, customer_id, current_period_end } = event.data || event;
+        const eventData = event.data || event;
+        const { subscription_id, customer_id, current_period_end } = eventData;
+        logger.info(`[PAYMENT_CONTROLLER] Subscription renewed data:`, { subscription_id, customer_id, current_period_end, eventData });
         await paymentService.handleSubscriptionRenewed(
           subscription_id,
           customer_id,

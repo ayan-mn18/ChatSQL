@@ -582,6 +582,8 @@ export async function handleSubscriptionRenewed(
   periodEnd: Date
 ): Promise<void> {
   try {
+    logger.info(`[PAYMENT_SERVICE] Handling subscription renewal: sub=${subscriptionId}, cust=${customerId}`);
+    
     // Update subscription period
     await sequelize.query(
       `UPDATE subscriptions 

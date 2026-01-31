@@ -29,3 +29,11 @@ export {
   consumeRateLimit,
   type RateLimitType,
 } from './rateLimit';
+export {
+  attachPlanInfo,
+  enforceReadOnly,
+  checkAITokenLimit,
+  checkQueryLimit,
+  checkConnectionLimit,
+  enforceSelectOnly,
+} from './planLimits';

@@ -12,7 +12,7 @@ import { Sequelize } from 'sequelize';
 import { connectDatabase } from './src/config/db';
 
 // Import routes
-import { authRoutes, connectionRoutes, jobsRoutes, adminRoutes, aiRoutes, viewerRoutes, savedQueriesRoutes, chatRoutes, usageRoutes } from './src/routes';
+import { authRoutes, connectionRoutes, jobsRoutes, adminRoutes, aiRoutes, viewerRoutes, savedQueriesRoutes, chatRoutes, usageRoutes, paymentRoutes, contactRoutes } from './src/routes';
 
 // Import middleware
 import { errorHandler, notFoundHandler, globalRateLimit } from './src/middleware';
@@ -263,6 +263,12 @@ app.use('/api/chat', chatRoutes);
 
 // Usage routes (plans, tokens, usage dashboard)
 app.use('/api/usage', usageRoutes);
+
+// Payment routes (Dodo Payments integration)
+app.use('/api/payments', paymentRoutes);
+
+// Contact routes (contact forms, enterprise inquiries)
+app.use('/api/contact', contactRoutes);
 
 // Future routes - uncomment when implemented
 // app.use('/api/query', queryRoutes);

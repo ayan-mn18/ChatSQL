@@ -35,6 +35,18 @@ const envSchema = z.object({
   OPENAI_API_KEY: z.string().optional(),
   ANTHROPIC_API_KEY: z.string().optional(),
   
+  // Dodo Payments
+  DODO_PAYMENTS_API_KEY: z.string().optional(),
+  DODO_WEBHOOK_SECRET: z.string().optional(),
+  DODO_PRODUCT_ID_PRO_MONTHLY: z.string().optional(),  // Pro monthly subscription product ID
+  DODO_PRODUCT_ID_PRO_YEARLY: z.string().optional(),   // Pro yearly subscription product ID
+  DODO_PRODUCT_ID_LIFETIME: z.string().optional(),     // Lifetime one-time payment product ID
+  DODO_PAYMENTS_MODE: z.enum(['test_mode', 'live_mode']).default('test_mode'),
+  
+  // App URLs
+  APP_URL: z.string().default('http://localhost:5173'),
+  API_URL: z.string().default('http://localhost:3000'),
+  
   // CORS
   CORS_ORIGIN: z.string().default('*'),
 });
@@ -72,6 +84,14 @@ export const {
   GOOGLE_AI_MODEL,
   OPENAI_API_KEY,
   ANTHROPIC_API_KEY,
+  DODO_PAYMENTS_API_KEY,
+  DODO_WEBHOOK_SECRET,
+  DODO_PRODUCT_ID_PRO_MONTHLY,
+  DODO_PRODUCT_ID_PRO_YEARLY,
+  DODO_PRODUCT_ID_LIFETIME,
+  DODO_PAYMENTS_MODE,
+  APP_URL,
+  API_URL,
   CORS_ORIGIN
 } = env;
 

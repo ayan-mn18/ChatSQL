@@ -310,6 +310,191 @@ export const sendViewerInvitationEmail = async (
 };
 
 /**
+ * Send payment failed notification email
+ */
+export const sendPaymentFailedEmail = async (
+  email: string,
+  failureReason: string,
+  recipientUserId?: string
+): Promise<boolean> => {
+  let emailLogId: string | null = null;
+  try {
+    const transport = getTransporter();
+    const template = emailTemplates.paymentFailed(failureReason);
+    
+    emailLogId = await logEmailSent({
+      toEmail: email,
+      fromEmail: SMTP_FROM_EMAIL,
+      subject: template.subject,
+      emailType: 'payment_failed',
+      recipientUserId,
+      htmlContent: template.html,
+      textContent: template.text,
+      templateUsed: 'paymentFailed',
+      variables: { failureReason }
+    });
+
+    const info = await transport.sendMail({
+      from: `"${SMTP_FROM_NAME}" <${SMTP_FROM_EMAIL}>`,
+      to: email,
+      subject: template.subject,
+      text: template.text,
+      html: template.html,
+    });
+    
+    if (emailLogId) {
+      await updateEmailLogStatus({
+        id: emailLogId,
+        status: 'sent',
+        smtpMessageId: info.messageId,
+        smtpResponse: info.response,
+        sentAt: new Date()
+      });
+    }
+
+    logger.info(`✅ [EMAIL] Payment failed notification sent to ${email}`);
+    return true;
+  } catch (error: any) {
+    if (emailLogId) {
+      await updateEmailLogStatus({
+        id: emailLogId,
+        status: 'failed',
+        errorMessage: error.message,
+        failedAt: new Date()
+      });
+    }
+    logger.error(`❌ [EMAIL] Failed to send payment failed email to ${email}:`, error);
+    return false;
+  }
+};
+
+/**
+ * Send contact form confirmation email to user
+ */
+export const sendContactConfirmationEmail = async (
+  email: string,
+  name: string
+): Promise<boolean> => {
+  let emailLogId: string | null = null;
+  try {
+    const transport = getTransporter();
+    const template = emailTemplates.contactConfirmation(name);
+    
+    emailLogId = await logEmailSent({
+      toEmail: email,
+      fromEmail: SMTP_FROM_EMAIL,
+      subject: template.subject,
+      emailType: 'contact_confirmation',
+      htmlContent: template.html,
+      textContent: template.text,
+      templateUsed: 'contactConfirmation',
+      variables: { name }
+    });
+
+    const info = await transport.sendMail({
+      from: `"${SMTP_FROM_NAME}" <${SMTP_FROM_EMAIL}>`,
+      to: email,
+      subject: template.subject,
+      text: template.text,
+      html: template.html,
+    });
+    
+    if (emailLogId) {
+      await updateEmailLogStatus({
+        id: emailLogId,
+        status: 'sent',
+        smtpMessageId: info.messageId,
+        smtpResponse: info.response,
+        sentAt: new Date()
+      });
+    }
+
+    logger.info(`✅ [EMAIL] Contact confirmation sent to ${email}`);
+    return true;
+  } catch (error: any) {
+    if (emailLogId) {
+      await updateEmailLogStatus({
+        id: emailLogId,
+        status: 'failed',
+        errorMessage: error.message,
+        failedAt: new Date()
+      });
+    }
+    logger.error(`❌ [EMAIL] Failed to send contact confirmation to ${email}:`, error);
+    return false;
+  }
+};
+
+/**
+ * Send contact form notification to admin
+ */
+export const sendContactNotificationEmail = async (
+  data: {
+    name: string;
+    email: string;
+    company?: string;
+    subject: string;
+    message: string;
+    requestType: string;
+    planInterest?: string;
+    contactId?: string;
+  }
+): Promise<boolean> => {
+  let emailLogId: string | null = null;
+  try {
+    const transport = getTransporter();
+    const template = emailTemplates.contactNotification(data);
+    
+    // Admin email - could be configured via env
+    const adminEmail = process.env.ADMIN_EMAIL || 'admin@chatsql.dev';
+    
+    emailLogId = await logEmailSent({
+      toEmail: adminEmail,
+      fromEmail: SMTP_FROM_EMAIL,
+      subject: template.subject,
+      emailType: 'contact_notification',
+      htmlContent: template.html,
+      textContent: template.text,
+      templateUsed: 'contactNotification',
+      variables: data
+    });
+
+    const info = await transport.sendMail({
+      from: `"${SMTP_FROM_NAME}" <${SMTP_FROM_EMAIL}>`,
+      to: adminEmail,
+      replyTo: data.email, // Reply goes to the person who submitted
+      subject: template.subject,
+      text: template.text,
+      html: template.html,
+    });
+    
+    if (emailLogId) {
+      await updateEmailLogStatus({
+        id: emailLogId,
+        status: 'sent',
+        smtpMessageId: info.messageId,
+        smtpResponse: info.response,
+        sentAt: new Date()
+      });
+    }
+
+    logger.info(`✅ [EMAIL] Contact notification sent to admin`);
+    return true;
+  } catch (error: any) {
+    if (emailLogId) {
+      await updateEmailLogStatus({
+        id: emailLogId,
+        status: 'failed',
+        errorMessage: error.message,
+        failedAt: new Date()
+      });
+    }
+    logger.error(`❌ [EMAIL] Failed to send contact notification:`, error);
+    return false;
+  }
+};
+
+/**
  * Verify SMTP connection
  */
 export const verifySmtpConnection = async (): Promise<boolean> => {
@@ -423,5 +608,110 @@ export const emailTemplates = {
       </div>
     `,
     text: `You've been invited to ChatSQL by ${invitedBy}!\n\nYour login credentials:\nEmail: ${email}\nTemporary Password: ${tempPassword}\n\n${expiresAt ? `Note: Your access will expire on ${expiresAt.toLocaleDateString()} at ${expiresAt.toLocaleTimeString()}\n\n` : ''}Login at: ${process.env.FRONTEND_URL || 'http://localhost:5173'}/login\n\n${mustChangePassword ? 'You\'ll be asked to change your password on first login.' : ''}`
+  }),
+
+  paymentFailed: (failureReason: string) => ({
+    subject: 'Payment Failed - Action Required 💳',
+    html: `
+      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+        <h2 style="color: #dc3545;">Payment Failed 💳</h2>
+        <p>We were unable to process your payment for ChatSQL.</p>
+        
+        <div style="background: #f8d7da; padding: 20px; border-radius: 8px; margin: 20px 0; border-left: 4px solid #dc3545;">
+          <p style="margin: 0; color: #721c24;">
+            <strong>Reason:</strong> ${failureReason}
+          </p>
+        </div>
+        
+        <p>To continue using ChatSQL's premium features, please update your payment method:</p>
+        
+        <div style="text-align: center; margin: 30px 0;">
+          <a href="${process.env.FRONTEND_URL || 'http://localhost:5173'}/dashboard/billing" style="background: #007bff; color: white; padding: 14px 35px; text-decoration: none; border-radius: 8px; font-weight: bold; display: inline-block;">Update Payment Method</a>
+        </div>
+        
+        <p style="color: #666; font-size: 14px;">If you believe this is an error or need assistance, please contact our support team.</p>
+        
+        <hr style="border: none; border-top: 1px solid #eee; margin: 30px 0;">
+        <p style="color: #999; font-size: 12px;">© ${new Date().getFullYear()} ChatSQL. All rights reserved.</p>
+      </div>
+    `,
+    text: `Payment Failed\n\nWe were unable to process your payment for ChatSQL.\n\nReason: ${failureReason}\n\nTo continue using ChatSQL's premium features, please update your payment method at: ${process.env.FRONTEND_URL || 'http://localhost:5173'}/dashboard/billing`
+  }),
+
+  contactConfirmation: (name: string) => ({
+    subject: 'We received your message - ChatSQL',
+    html: `
+      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+        <h2 style="color: #333;">Thanks for reaching out, ${name}! 📬</h2>
+        <p>We've received your message and our team will get back to you as soon as possible.</p>
+        
+        <div style="background: #d4edda; padding: 20px; border-radius: 8px; margin: 20px 0; border-left: 4px solid #28a745;">
+          <p style="margin: 0; color: #155724;">
+            <strong>Expected response time:</strong> Within 24-48 hours
+          </p>
+        </div>
+        
+        <p>In the meantime, you can:</p>
+        <ul>
+          <li>Check out our <a href="${process.env.FRONTEND_URL || 'http://localhost:5173'}/docs">documentation</a></li>
+          <li>Explore ChatSQL's features</li>
+        </ul>
+        
+        <hr style="border: none; border-top: 1px solid #eee; margin: 30px 0;">
+        <p style="color: #999; font-size: 12px;">© ${new Date().getFullYear()} ChatSQL. All rights reserved.</p>
+      </div>
+    `,
+    text: `Thanks for reaching out, ${name}!\n\nWe've received your message and our team will get back to you as soon as possible.\n\nExpected response time: Within 24-48 hours`
+  }),
+
+  contactNotification: (data: { name: string; email: string; company?: string; subject: string; message: string; requestType: string; planInterest?: string; contactId?: string }) => ({
+    subject: `[ChatSQL] New ${data.requestType === 'enterprise' ? 'Enterprise' : 'Contact'} Inquiry from ${data.name}`,
+    html: `
+      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+        <h2 style="color: #333;">New Contact Form Submission</h2>
+        
+        <table style="width: 100%; border-collapse: collapse; margin: 20px 0;">
+          <tr style="border-bottom: 1px solid #eee;">
+            <td style="padding: 10px 0; font-weight: bold; width: 120px;">Name:</td>
+            <td style="padding: 10px 0;">${data.name}</td>
+          </tr>
+          <tr style="border-bottom: 1px solid #eee;">
+            <td style="padding: 10px 0; font-weight: bold;">Email:</td>
+            <td style="padding: 10px 0;"><a href="mailto:${data.email}">${data.email}</a></td>
+          </tr>
+          ${data.company ? `
+          <tr style="border-bottom: 1px solid #eee;">
+            <td style="padding: 10px 0; font-weight: bold;">Company:</td>
+            <td style="padding: 10px 0;">${data.company}</td>
+          </tr>
+          ` : ''}
+          <tr style="border-bottom: 1px solid #eee;">
+            <td style="padding: 10px 0; font-weight: bold;">Type:</td>
+            <td style="padding: 10px 0;"><span style="background: ${data.requestType === 'enterprise' ? '#ffc107' : '#17a2b8'}; color: ${data.requestType === 'enterprise' ? '#000' : '#fff'}; padding: 3px 8px; border-radius: 4px; font-size: 12px;">${data.requestType.toUpperCase()}</span></td>
+          </tr>
+          ${data.planInterest ? `
+          <tr style="border-bottom: 1px solid #eee;">
+            <td style="padding: 10px 0; font-weight: bold;">Plan Interest:</td>
+            <td style="padding: 10px 0;">${data.planInterest}</td>
+          </tr>
+          ` : ''}
+          <tr style="border-bottom: 1px solid #eee;">
+            <td style="padding: 10px 0; font-weight: bold;">Subject:</td>
+            <td style="padding: 10px 0;">${data.subject}</td>
+          </tr>
+        </table>
+        
+        <div style="background: #f8f9fa; padding: 20px; border-radius: 8px; margin: 20px 0;">
+          <h4 style="margin-top: 0;">Message:</h4>
+          <p style="white-space: pre-wrap;">${data.message}</p>
+        </div>
+        
+        ${data.contactId ? `<p style="color: #666; font-size: 12px;">Contact ID: ${data.contactId}</p>` : ''}
+        
+        <hr style="border: none; border-top: 1px solid #eee; margin: 30px 0;">
+        <p style="color: #999; font-size: 12px;">This is an automated notification from ChatSQL.</p>
+      </div>
+    `,
+    text: `New Contact Form Submission\n\nName: ${data.name}\nEmail: ${data.email}\n${data.company ? `Company: ${data.company}\n` : ''}Type: ${data.requestType}\n${data.planInterest ? `Plan Interest: ${data.planInterest}\n` : ''}Subject: ${data.subject}\n\nMessage:\n${data.message}`
   })
 };

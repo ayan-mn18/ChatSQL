@@ -7,6 +7,8 @@ export { default as viewerRoutes } from './viewer.routes';
 export { default as savedQueriesRoutes } from './saved-queries.routes';
 export { default as chatRoutes } from './chat.routes';
 export { default as usageRoutes } from './usage.routes';
+export { default as paymentRoutes } from './payment.routes';
+export { default as contactRoutes } from './contact.routes';
 
 // Future routes - uncomment when implemented
 // export { default as queryRoutes } from './query.routes';

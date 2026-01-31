@@ -387,7 +387,8 @@ export async function handlePaymentSucceeded(
   paymentId: string,
   customerId: string,
   amount: number,
-  metadata: Record<string, any>
+  metadata: Record<string, any>,
+  subscriptionId?: string
 ): Promise<void> {
   const { user_id, plan_type } = metadata;
   
@@ -397,43 +398,55 @@ export async function handlePaymentSucceeded(
   }
   
   try {
-    // Record the payment
-    await sequelize.query(
-      `INSERT INTO payments (user_id, dodo_payment_id, dodo_customer_id, amount, status, plan_type, description)
-       VALUES (:userId, :paymentId, :customerId, :amount, 'succeeded', :planType, :description)`,
+    // Create subscription record first
+    const isLifetime = plan_type === 'lifetime';
+    
+    const subscriptionResult = await sequelize.query<any>(
+      `INSERT INTO subscriptions (
+        user_id, plan_type, dodo_customer_id, dodo_subscription_id, status, is_lifetime, amount, 
+        billing_interval, current_period_start, current_period_end
+      ) VALUES (
+        :userId, :planType, :customerId, :subscriptionId, 'active', :isLifetime, :amount,
+        :billingInterval, CURRENT_TIMESTAMP, 
+        CASE WHEN :isLifetime THEN NULL 
+             WHEN :planType = 'pro_yearly' THEN CURRENT_TIMESTAMP + INTERVAL '1 year'
+             ELSE CURRENT_TIMESTAMP + INTERVAL '1 month' END
+      ) RETURNING id`,
       {
         replacements: {
           userId: user_id,
-          paymentId,
-          customerId,
-          amount: amount / 100, // Convert from cents
           planType: plan_type,
-          description: `Payment for ${plan_type} plan`,
+          customerId,
+          subscriptionId,
+          isLifetime,
+          amount: amount / 100,
+          billingInterval: isLifetime ? 'one_time' : (plan_type === 'pro_yearly' ? 'yearly' : 'monthly'),
         },
-        type: QueryTypes.INSERT,
+        type: QueryTypes.SELECT,
       }
     );
     
-    // Create subscription record
-    const isLifetime = plan_type === 'lifetime';
+    const subscriptionId_db = (subscriptionResult[0] as any)?.id;
     
+    // Record the payment linked to the subscription
     await sequelize.query(
-      `INSERT INTO subscriptions (
-        user_id, plan_type, dodo_customer_id, status, is_lifetime, amount, 
-        billing_interval, current_period_start, current_period_end
+      `INSERT INTO payments (
+        user_id, subscription_id, dodo_payment_id, dodo_customer_id, 
+        amount, currency, status, plan_type, description, payment_method
       ) VALUES (
-        :userId, :planType, :customerId, 'active', :isLifetime, :amount,
-        :billingInterval, CURRENT_TIMESTAMP, 
-        CASE WHEN :isLifetime THEN NULL ELSE CURRENT_TIMESTAMP + INTERVAL '1 month' END
+        :userId, :subscriptionId, :paymentId, :customerId,
+        :amount, :currency, 'succeeded', :planType, :description, 'card'
       )`,
       {
         replacements: {
           userId: user_id,
-          planType: plan_type,
+          subscriptionId: subscriptionId_db,
+          paymentId,
           customerId,
-          isLifetime,
           amount: amount / 100,
-          billingInterval: isLifetime ? 'one_time' : 'monthly',
+          currency: 'INR', // Based on webhook payload
+          planType: plan_type,
+          description: `Payment for ${plan_type} plan`,
         },
         type: QueryTypes.INSERT,
       }

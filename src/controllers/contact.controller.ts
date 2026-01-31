@@ -72,11 +72,11 @@ export const submitContactForm = async (req: Request, res: Response): Promise<vo
           ipAddress,
           userAgent,
         },
-        type: QueryTypes.INSERT,
+        type: QueryTypes.SELECT,
       }
     );
 
-    const contactId = result?.[0]?.id || result;
+    const contactId = result?.id;
 
     // Send notification email to admin
     try {

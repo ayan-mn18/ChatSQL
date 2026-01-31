@@ -11,7 +11,7 @@ export interface EmailLogParams {
   toEmail: string;
   fromEmail: string;
   subject: string;
-  emailType: 'verification' | 'password_reset' | 'welcome' | 'viewer_invitation' | 'notification' | 'general';
+  emailType: 'verification' | 'password_reset' | 'welcome' | 'viewer_invitation' | 'notification' | 'general' | 'payment_failed' | 'contact_confirmation' | 'contact_notification';
   recipientUserId?: string;
   senderUserId?: string;
   htmlContent?: string;

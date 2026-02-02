@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { authenticate, heavyRateLimit } from '../middleware';
 import * as chatController from '../controllers/chat.controller';
+import { handleStreamChat } from '../controllers/streaming-chat.controller';
 
 const router = Router();
 
@@ -53,7 +54,7 @@ router.post(
   '/:connectionId/stream',
   authenticate,
   heavyRateLimit,
-  chatController.streamChatResponse
+  handleStreamChat
 );
 
 /**

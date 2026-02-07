@@ -2085,6 +2085,8 @@ export const executeQuery = async (req: Request, res: Response): Promise<void> =
     }
 
     // For viewers, enforce read-only for SELECT queries, allow mutation for permitted types
+    // For admins/super_admins, respect the readOnly flag from the request body
+    // The frontend sends readOnly=false for non-SELECT queries from admins
     const enforceReadOnly = userRole === 'viewer' 
       ? queryType === 'SELECT'
       : readOnly;
@@ -2107,6 +2109,7 @@ export const executeQuery = async (req: Request, res: Response): Promise<void> =
     // Limit stored raw_result to keep DB small
     const rawResultSnapshot = {
       rowCount: result.rowCount ?? null,
+      affectedRows: result.affectedRows ?? null,
       executionTimeMs: result.executionTime ?? null,
       rows: Array.isArray(result.rows) ? result.rows.slice(0, 25) : [],
     };
@@ -2202,7 +2205,7 @@ export const executeQuery = async (req: Request, res: Response): Promise<void> =
       });
     }
     
-    logger.info(`[CONNECTION] Executed query (${queryType}), returned ${result.rowCount} rows in ${result.executionTime}ms`);
+    logger.info(`[CONNECTION] Executed query (${queryType}), returned ${result.rowCount} rows${result.affectedRows != null ? `, ${result.affectedRows} affected` : ''} in ${result.executionTime}ms`);
     res.json({
       success: true,
       ...result,
@@ -2256,7 +2259,9 @@ export const executeQuery = async (req: Request, res: Response): Promise<void> =
     res.status(500).json({
       success: false,
       error: error.message || 'Failed to execute query',
-      code: 'EXECUTE_QUERY_ERROR'
+      code: 'EXECUTE_QUERY_ERROR',
+      errorDetails: (error as any).errorDetails || undefined,
+      queryType: (error as any).queryType || detectQueryType(req.body?.query?.trim?.() || ''),
     });
   }
 };

@@ -700,12 +700,100 @@ function stripSqlComments(sql: string): string {
 }
 
 /**
- * Process raw SQL query job (for AI-generated queries)
+ * Detect query type from SQL string (used for choosing Sequelize QueryType)
+ */
+function detectSQLQueryType(query: string): 'SELECT' | 'INSERT' | 'UPDATE' | 'DELETE' | 'DDL' | 'OTHER' {
+  const stripped = stripSqlComments(query).trim().toUpperCase();
+  if (stripped.startsWith('SELECT') || stripped.startsWith('WITH')) return 'SELECT';
+  if (stripped.startsWith('INSERT')) return 'INSERT';
+  if (stripped.startsWith('UPDATE')) return 'UPDATE';
+  if (stripped.startsWith('DELETE')) return 'DELETE';
+  if (/^(CREATE|ALTER|DROP|TRUNCATE|GRANT|REVOKE)/.test(stripped)) return 'DDL';
+  return 'OTHER';
+}
+
+/**
+ * Map our query type to the appropriate Sequelize QueryType
+ */
+function getSequelizeQueryType(queryType: string): QueryTypes {
+  switch (queryType) {
+    case 'SELECT': return QueryTypes.SELECT;
+    case 'INSERT': return QueryTypes.INSERT;
+    case 'UPDATE': return QueryTypes.UPDATE;
+    case 'DELETE': return QueryTypes.DELETE;
+    default: return QueryTypes.RAW;
+  }
+}
+
+/**
+ * Extract detailed error information from a database error
+ */
+function extractDetailedError(error: any, query: string): {
+  message: string;
+  detail?: string;
+  hint?: string;
+  position?: number;
+  line?: number;
+  errorColumn?: number;
+  code?: string;
+  constraint?: string;
+  table?: string;
+  schema?: string;
+  dataType?: string;
+  queryExcerpt?: string;
+} {
+  const result: any = {
+    message: error.message || 'Unknown error',
+  };
+
+  // PostgreSQL-specific error fields (from pg driver)
+  if (error.original) {
+    const orig = error.original;
+    if (orig.detail) result.detail = orig.detail;
+    if (orig.hint) result.hint = orig.hint;
+    if (orig.position) result.position = parseInt(orig.position, 10);
+    if (orig.code) result.code = orig.code;
+    if (orig.constraint) result.constraint = orig.constraint;
+    if (orig.table) result.table = orig.table;
+    if (orig.schema) result.schema = orig.schema;
+    if (orig.datatype) result.dataType = orig.datatype;
+  } else if (error.parent) {
+    const parent = error.parent;
+    if (parent.detail) result.detail = parent.detail;
+    if (parent.hint) result.hint = parent.hint;
+    if (parent.position) result.position = parseInt(parent.position, 10);
+    if (parent.code) result.code = parent.code;
+    if (parent.constraint) result.constraint = parent.constraint;
+    if (parent.table) result.table = parent.table;
+    if (parent.schema) result.schema = parent.schema;
+  }
+
+  // Calculate line number and column from character position
+  if (result.position && query) {
+    const upToError = query.substring(0, result.position);
+    const lines = upToError.split('\n');
+    result.line = lines.length;
+    result.errorColumn = lines[lines.length - 1].length;
+
+    // Extract a snippet around the error position
+    const start = Math.max(0, result.position - 40);
+    const end = Math.min(query.length, result.position + 40);
+    result.queryExcerpt = (start > 0 ? '...' : '') + 
+      query.substring(start, result.position) + '⚠️' + query.substring(result.position, end) +
+      (end < query.length ? '...' : '');
+  }
+
+  return result;
+}
+
+/**
+ * Process raw SQL query job — supports ALL query types (SELECT, INSERT, UPDATE, DELETE, DDL)
  */
 async function processExecuteRawSQL(job: Job<ExecuteRawSQLJobData>): Promise<any> {
   const { connectionId, userId, query, parameters, readOnly } = job.data;
   
-  logger.info(`[DB_OPS] Processing RAW SQL for connection: ${connectionId}`);
+  const queryType = detectSQLQueryType(query);
+  logger.info(`[DB_OPS] Processing RAW SQL (${queryType}) for connection: ${connectionId}, readOnly=${readOnly}`);
   job.updateProgress(10);
   
   // Security check for read-only mode
@@ -737,15 +825,72 @@ async function processExecuteRawSQL(job: Job<ExecuteRawSQLJobData>): Promise<any
     job.updateProgress(30);
     
     const startTime = Date.now();
-    const result = await userDB.query(query, {
+    const seqQueryType = getSequelizeQueryType(queryType);
+    
+    // Execute with appropriate QueryType
+    const rawResult = await userDB.query(query, {
       replacements: parameters,
-      type: QueryTypes.SELECT,
+      type: seqQueryType,
     });
     const executionTime = Date.now() - startTime;
     
     job.updateProgress(90);
     
-    const rowCount = Array.isArray(result) ? result.length : 0;
+    // Process result based on query type
+    let rows: any[] = [];
+    let rowCount = 0;
+    let affectedRows: number | undefined;
+    let returning: any[] | undefined;
+    
+    if (queryType === 'SELECT') {
+      // SELECT: result is array of rows
+      rows = Array.isArray(rawResult) ? rawResult : [];
+      rowCount = rows.length;
+    } else if (queryType === 'INSERT') {
+      // INSERT: rawResult can vary — Sequelize INSERT type returns [rows, metadata]
+      if (Array.isArray(rawResult) && rawResult.length === 2) {
+        // [resultRows, metadata] — metadata contains rowCount for INSERT
+        const [insertRows, metadata] = rawResult as [any[], any];
+        if (Array.isArray(insertRows) && insertRows.length > 0 && typeof insertRows[0] === 'object') {
+          // RETURNING clause was used
+          returning = insertRows;
+          rows = insertRows;
+          rowCount = insertRows.length;
+        }
+        affectedRows = (metadata as any)?.rowCount ?? (typeof metadata === 'number' ? metadata : undefined);
+      } else if (Array.isArray(rawResult)) {
+        rows = rawResult;
+        rowCount = rawResult.length;
+      }
+      if (affectedRows === undefined) affectedRows = rowCount || 1;
+    } else if (queryType === 'UPDATE' || queryType === 'DELETE') {
+      // UPDATE/DELETE: Sequelize returns [undefined, metadata] or [results, metadata]
+      if (Array.isArray(rawResult) && rawResult.length === 2) {
+        const [resultRows, metadata] = rawResult as [any, any];
+        affectedRows = (metadata as any)?.rowCount ?? 0;
+        // If RETURNING clause used, resultRows may have data
+        if (Array.isArray(resultRows) && resultRows.length > 0 && typeof resultRows[0] === 'object') {
+          returning = resultRows;
+          rows = resultRows;
+          rowCount = resultRows.length;
+        }
+      } else {
+        affectedRows = 0;
+      }
+    } else {
+      // DDL/OTHER: Sequelize RAW type returns [results, metadata]
+      if (Array.isArray(rawResult) && rawResult.length === 2) {
+        const [resultRows, metadata] = rawResult as [any, any];
+        if (Array.isArray(resultRows)) {
+          rows = resultRows;
+          rowCount = resultRows.length;
+        }
+        affectedRows = (metadata as any)?.rowCount;
+      } else if (Array.isArray(rawResult)) {
+        rows = rawResult;
+        rowCount = rawResult.length;
+      }
+    }
     
     logViewerActivity({
       viewerUserId: userId,
@@ -753,7 +898,9 @@ async function processExecuteRawSQL(job: Job<ExecuteRawSQLJobData>): Promise<any
       actionType: 'query_executed',
       actionDetails: {
         status: 'success',
+        queryType,
         rowCount,
+        affectedRows,
         executionTimeMs: executionTime,
       },
     }).catch(() => {
@@ -762,24 +909,35 @@ async function processExecuteRawSQL(job: Job<ExecuteRawSQLJobData>): Promise<any
     
     return {
       success: true,
-      rows: result,
+      rows,
       rowCount,
+      affectedRows,
+      returning,
       executionTime,
+      queryType,
     };
   } catch (error: any) {
+    const errorDetails = extractDetailedError(error, query);
+    
     logViewerActivity({
       viewerUserId: userId,
       connectionId,
       actionType: 'query_executed',
       actionDetails: {
         status: 'error',
+        queryType,
         errorMessage: error.message,
+        errorCode: errorDetails.code,
       },
     }).catch(() => {
       // swallow
     });
     
-    throw error;
+    // Rethrow with enriched error info attached
+    const enrichedError = new Error(error.message);
+    (enrichedError as any).errorDetails = errorDetails;
+    (enrichedError as any).queryType = queryType;
+    throw enrichedError;
   } finally {
     await userDB.close();
     job.updateProgress(100);

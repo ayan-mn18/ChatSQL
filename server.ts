@@ -327,6 +327,9 @@ async function gracefulShutdown(signal: string) {
   // Close Redis connections
   await closeRedisConnections();
   
+  // Flush all pending logs to BetterStack before exiting
+  await logger.flush();
+  
   logger.info('[SERVER] Shutdown complete');
   process.exit(0);
 }
@@ -335,12 +338,32 @@ async function gracefulShutdown(signal: string) {
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 
+// Catch unhandled errors and send to BetterStack
+process.on('unhandledRejection', async (reason: any) => {
+  logger.error('[PROCESS] Unhandled Promise Rejection', {
+    reason: reason instanceof Error ? reason.message : String(reason),
+    stack: reason instanceof Error ? reason.stack : undefined,
+  });
+  await logger.flush();
+});
+
+process.on('uncaughtException', async (error: Error) => {
+  logger.error('[PROCESS] Uncaught Exception', {
+    errorName: error.name,
+    errorMessage: error.message,
+    stack: error.stack,
+  });
+  await logger.flush();
+  process.exit(1);
+});
+
 // Start the server and listen on the specified port
 app.listen(PORT, async () => {
   // Log a message when the server is successfully running
   logger.info('Cors allowed for:', env.CORS_ORIGIN || "https://sql.bizer.dev");
   logger.info(`🚀 Server is running on http://localhost:${PORT}`);
   logger.info(`📚 Environment: ${env.NODE_ENV || 'development'}`);
+  logger.info(`📊 BetterStack Logging: ${env.BETTERSTACK_SOURCE_TOKEN ? '✅ Connected' : '⚠️ No token set, console-only'}`);
   
   // Connect to database
   await connectDatabase();

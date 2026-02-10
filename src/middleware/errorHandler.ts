@@ -11,15 +11,22 @@ export const errorHandler = (
   res: Response,
   next: NextFunction
 ): void => {
-  logger.error('Error:', {
-    message: err.message,
-    stack: err.stack,
-    path: req.path,
-    method: req.method
-  });
-
   const statusCode = err.statusCode || 500;
   const code = err.code || 'INTERNAL_ERROR';
+
+  logger.error(`[ERROR] ${req.method} ${req.path} → ${statusCode}`, {
+    statusCode,
+    code,
+    message: err.message,
+    stack: err.stack,
+    method: req.method,
+    path: req.path,
+    url: req.originalUrl,
+    ip: req.ip,
+    userId: (req as any).userId || null,
+    userAgent: req.get('user-agent'),
+    query: req.query,
+  });
 
   res.status(statusCode).json({
     success: false,
@@ -38,6 +45,13 @@ export const notFoundHandler = (
   res: Response,
   next: NextFunction
 ): void => {
+  logger.warn(`[NOT_FOUND] ${req.method} ${req.path}`, {
+    method: req.method,
+    path: req.path,
+    ip: req.ip,
+    userAgent: req.get('user-agent'),
+  });
+
   res.status(404).json({
     success: false,
     error: `Route ${req.method} ${req.path} not found`,

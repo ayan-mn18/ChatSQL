@@ -82,6 +82,11 @@ export const authenticate = async (
     next();
   } catch (error) {
     if (error instanceof jwt.TokenExpiredError) {
+      logger.warn('[AUTH] Token expired', {
+        path: req.path,
+        ip: req.ip,
+        userAgent: req.get('user-agent'),
+      });
       res.status(401).json({
         success: false,
         error: 'Token expired',
@@ -91,6 +96,12 @@ export const authenticate = async (
     }
 
     if (error instanceof jwt.JsonWebTokenError) {
+      logger.warn('[AUTH] Invalid token attempt', {
+        path: req.path,
+        ip: req.ip,
+        userAgent: req.get('user-agent'),
+        reason: error.message,
+      });
       res.status(401).json({
         success: false,
         error: 'Invalid token',

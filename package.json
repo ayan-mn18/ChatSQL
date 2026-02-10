@@ -32,6 +32,7 @@
     "@bull-board/api": "^6.15.0",
     "@bull-board/express": "^6.15.0",
     "@google/generative-ai": "^0.24.1",
+    "@logtail/node": "^0.5.6",
     "ai": "^4.1.25",
     "bcrypt": "^6.0.0",
     "bullmq": "^5.65.1",

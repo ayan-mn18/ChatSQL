@@ -49,6 +49,9 @@ const envSchema = z.object({
   
   // CORS
   CORS_ORIGIN: z.string().default('*'),
+  
+  // BetterStack (Logging)
+  BETTERSTACK_SOURCE_TOKEN: z.string().optional(),
 });
 
 // Validate and export environment variables
@@ -92,7 +95,8 @@ export const {
   DODO_PAYMENTS_MODE,
   APP_URL,
   API_URL,
-  CORS_ORIGIN
+  CORS_ORIGIN,
+  BETTERSTACK_SOURCE_TOKEN,
 } = env;
 
 export const isDevelopment = NODE_ENV === 'development';

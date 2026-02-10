@@ -186,7 +186,16 @@ export function rateLimit(type: RateLimitType) {
       const rateLimitError = error as IRateLimiterRes;
       const retryAfter = Math.ceil((rateLimitError.msBeforeNext || 1000) / 1000);
       
-      logger.warn(`[RATE_LIMIT] ${type} limit exceeded for ${key}`, { retryAfter });
+      logger.warn(`[RATE_LIMIT] ${type} limit exceeded for ${key}`, {
+        rateLimitType: type,
+        key,
+        retryAfter,
+        path: req.path,
+        method: req.method,
+        ip: req.ip,
+        userId: (req as any).userId || null,
+        userAgent: req.get('user-agent'),
+      });
       
       sendRateLimitResponse(res, retryAfter, type);
     }

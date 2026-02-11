@@ -31,13 +31,13 @@ const RATE_LIMITS = {
   },
   // AI: Prevent abuse of expensive AI operations
   ai: {
-    points: 20,         // 20 AI requests
+    points: 1000,       // 1000 AI requests
     duration: 60,       // Per minute
     blockDuration: 30,  // Block for 30 seconds
   },
   // Heavy: Schema sync and other heavy operations
   heavy: {
-    points: 10,          // 10 heavy operations (Increased from 5)
+    points: 20,         // 20 heavy operations
     duration: 300,      // Per 5 minutes
     blockDuration: 60,  // Block for 1 minute
   },

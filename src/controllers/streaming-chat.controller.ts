@@ -118,7 +118,7 @@ export const handleStreamChat = async (req: Request, res: Response): Promise<voi
         connectionId,
         result.intent === 'sql_generation' ? 'generate_sql' : 'chat',
         result.tokenUsage,
-        'gemini-2.0-flash', // Will be updated to use actual model
+        result.model || 'unknown',
         message.substring(0, 200),
         result.content.substring(0, 200)
       );
@@ -131,6 +131,8 @@ export const handleStreamChat = async (req: Request, res: Response): Promise<voi
       intent: result.intent,
       sql: result.sql,
       tablesUsed: result.tablesUsed,
+      model: result.model,
+      provider: result.provider,
     })}\n\n`);
 
     res.end();

@@ -482,6 +482,40 @@ async function fetchColumnsForTable(userDb: Sequelize, schemaName: string, table
     schema: fk.foreign_table_schema
   }]));
 
+  // Get enum values for USER-DEFINED enum columns
+  const enumUdtNames = columns
+    .filter(col => col.data_type === 'USER-DEFINED')
+    .map(col => col.udt_name);
+
+  const enumMap = new Map<string, string[]>();
+
+  if (enumUdtNames.length > 0) {
+    // Deduplicate type names (multiple columns may share the same enum type)
+    const uniqueUdtNames = [...new Set(enumUdtNames)];
+
+    const enumResult = await userDb.query<{
+      typname: string;
+      enumlabel: string;
+    }>(
+      `SELECT t.typname, e.enumlabel
+       FROM pg_enum e
+       JOIN pg_type t ON e.enumtypid = t.oid
+       WHERE t.typname = ANY($1)
+       ORDER BY t.typname, e.enumsortorder`,
+      {
+        bind: [uniqueUdtNames],
+        type: QueryTypes.SELECT
+      }
+    );
+
+    for (const row of enumResult) {
+      if (!enumMap.has(row.typname)) {
+        enumMap.set(row.typname, []);
+      }
+      enumMap.get(row.typname)!.push(row.enumlabel);
+    }
+  }
+
   return columns.map(col => ({
     name: col.column_name,
     data_type: col.character_maximum_length 
@@ -495,6 +529,7 @@ async function fetchColumnsForTable(userDb: Sequelize, schemaName: string, table
     default_value: col.column_default || undefined,
     max_length: col.character_maximum_length || undefined,
     numeric_precision: col.numeric_precision || undefined,
+    enum_values: enumMap.get(col.udt_name) || undefined,
   }));
 }
 

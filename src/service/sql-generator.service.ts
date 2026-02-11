@@ -28,6 +28,8 @@ export interface SqlGenerationResult {
   };
   tablesUsed?: string[];
   description?: string;
+  model?: string;
+  provider?: string;
   error?: string;
   tokenUsage?: {
     inputTokens: number;
@@ -36,24 +38,26 @@ export interface SqlGenerationResult {
   };
 }
 
-const SQL_GENERATOR_SYSTEM_PROMPT = `You are an expert PostgreSQL query writer. You help users write efficient, correct SQL queries.
+const SQL_GENERATOR_SYSTEM_PROMPT = `You are an expert PostgreSQL query writer.
 
-Your response style:
-- Be conversational and helpful, like a senior developer explaining to a colleague
-- Include the SQL query in a markdown code block (\`\`\`sql ... \`\`\`)
-- Explain your reasoning naturally, not in a rigid format
-- If something is unclear, ask for clarification
-- Mention any important assumptions you made
-- Point out potential performance considerations when relevant
+Response format:
+1. A brief 1-2 sentence summary of what the query does
+2. The SQL query in a markdown code block (\`\`\`sql ... \`\`\`)
+3. If you made important assumptions, mention them in ONE short sentence after the SQL
 
-Guidelines for SQL:
+Do NOT:
+- Give long explanations or step-by-step breakdowns unless user explicitly asks "explain in detail"
+- Add unnecessary commentary
+- Repeat what the user asked
+
+SQL Guidelines:
 - Use schema-qualified table names (e.g., public.users)
 - Prefer explicit column lists over SELECT *
 - Use appropriate JOINs based on relationships
-- Add reasonable LIMITs for large result sets unless user wants all rows
+- Add reasonable LIMITs for large result sets
 - Use CTEs for complex queries to improve readability
 
-Keep responses concise but complete. Don't over-explain simple queries.`;
+Be direct. Query first, talk later.`;
 
 /**
  * Build conversation context from chat history
@@ -146,8 +150,9 @@ export async function streamSqlGeneration(
   const conversationContext = buildConversationContext(chatHistory);
   const messages = buildPrompt(userMessage, schemaContext, conversationContext);
 
-  // Get powerful model for SQL generation
+  // Use balanced tier for SQL generation (prefers Anthropic for quality)
   const { provider, model } = getModelForTier('balanced');
+  logger.info(`[SQL_GEN] Using ${provider}/${model} for SQL generation`);
 
   let fullContent = '';
   let tokenUsage = { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
@@ -204,6 +209,8 @@ export async function streamSqlGeneration(
             query,
             tablesUsed,
             description: fullContent,
+            model,
+            provider,
             tokenUsage,
           });
         },
@@ -224,8 +231,9 @@ export async function generateSql(
   const conversationContext = buildConversationContext(chatHistory);
   const messages = buildPrompt(userMessage, schemaContext, conversationContext);
 
-  // Get balanced model for SQL generation
+  // Get balanced model for SQL generation (prefers Anthropic)
   const { provider, model } = getModelForTier('balanced');
+  logger.info(`[SQL_GEN] Using ${provider}/${model} for non-streaming SQL generation`);
 
   try {
     const response = await complete(messages, { provider, model });

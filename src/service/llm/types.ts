@@ -66,18 +66,31 @@ export interface ILLMProvider {
 // Model configurations for different tiers
 export const MODEL_CONFIG: Record<LLMProvider, Record<ModelTier, string>> = {
   openai: {
-    fast: 'gpt-4o-mini',        // Cheap, fast - for intent detection
-    balanced: 'gpt-4o',          // Good balance
-    powerful: 'gpt-4-turbo',     // Most capable
+    fast: 'gpt-4o-mini',                    // Cheap, fast - for intent detection
+    balanced: 'gpt-4o',                      // Good balance
+    powerful: 'gpt-4o',                      // Most capable
   },
   gemini: {
-    fast: 'gemini-2.0-flash',    // Cheap, fast
-    balanced: 'gemini-1.5-flash', // Good balance
-    powerful: 'gemini-1.5-pro',   // Most capable
+    fast: 'gemini-2.0-flash',               // Cheap, fast
+    balanced: 'gemini-1.5-flash',            // Good balance
+    powerful: 'gemini-1.5-pro',              // Most capable
   },
   anthropic: {
-    fast: 'claude-3-haiku-20240307',     // Cheap, fast
-    balanced: 'claude-3-5-sonnet-20241022', // Good balance
-    powerful: 'claude-3-opus-20240229',    // Most capable
+    fast: 'claude-3-5-haiku-latest',          // Cheap, fast
+    balanced: 'claude-sonnet-4-20250514',     // Strong SQL generation
+    powerful: 'claude-sonnet-4-20250514',     // Best for complex SQL & agent tasks
   },
+};
+
+/**
+ * Smart tier-to-provider mapping.
+ * Different tiers can prefer different providers for optimal cost/quality.
+ * - fast: Use Gemini (cheapest, fastest for intent classification & casual chat)
+ * - balanced: Use Anthropic if available (best SQL generation quality)
+ * - powerful: Use Anthropic if available (best for complex reasoning & agent tasks)
+ */
+export const TIER_PROVIDER_PREFERENCE: Record<ModelTier, LLMProvider[]> = {
+  fast: ['gemini', 'openai', 'anthropic'],       // Cheapest first
+  balanced: ['anthropic', 'openai', 'gemini'],   // Best quality first
+  powerful: ['anthropic', 'openai', 'gemini'],   // Best reasoning first
 };

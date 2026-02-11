@@ -24,6 +24,8 @@ export interface StreamChatResult {
   content: string;
   sql?: string;
   tablesUsed?: string[];
+  model?: string;
+  provider?: string;
   tokenUsage?: {
     inputTokens: number;
     outputTokens: number;
@@ -31,20 +33,18 @@ export interface StreamChatResult {
   };
 }
 
-const GENERAL_CHAT_SYSTEM_PROMPT = `You are a friendly database assistant. You help users with their database questions and can help them write SQL queries.
+const GENERAL_CHAT_SYSTEM_PROMPT = `You are a friendly, concise database assistant.
 
-Keep responses concise and helpful. If the user seems to want a SQL query, let them know you can help generate one - just ask them to be more specific about what data they need.
+Rules:
+- Keep responses SHORT (1-3 sentences max for greetings and casual chat)
+- For "hi", "hello", "hey" etc., respond with a brief friendly greeting and ask how you can help
+- If the user seems to want a SQL query, suggest they ask specifically
+- You have access to their database schema
+- Never give long explanations unless explicitly asked`;
 
-You have access to their database schema, so you can answer questions about tables, columns, and relationships.`;
+const CLARIFICATION_SYSTEM_PROMPT = `You are a database assistant. The user's request is unclear.
 
-const CLARIFICATION_SYSTEM_PROMPT = `You are a database assistant helping a user write SQL queries.
-
-The user's request is unclear. Ask a brief, friendly clarifying question to understand:
-- What tables/data they want to query
-- What conditions or filters they need
-- How they want the results sorted or grouped
-
-Keep your question short and specific.`;
+Ask ONE brief, specific clarifying question. Keep it under 2 sentences.`;
 
 /**
  * Stream a chat response to the client
@@ -119,6 +119,8 @@ async function handleSqlGeneration(
     content: result.description || '',
     sql: result.query,
     tablesUsed: result.tablesUsed,
+    model: result.model,
+    provider: result.provider,
     tokenUsage: result.tokenUsage,
   };
 }
@@ -141,11 +143,12 @@ async function handleSqlExplanation(
 
   const systemPrompt = `You are a SQL expert. Explain the following SQL query in plain English.
 
-Be concise and focus on:
-1. What data is being retrieved/modified
-2. Key conditions and filters
-3. Any JOINs and their purpose
-4. Performance considerations if relevant
+Be concise:
+1. What data is being retrieved/modified (1 sentence)
+2. Key JOINs/conditions (if notable)
+3. Performance note (only if there's an issue)
+
+Keep explanation under 4 sentences unless user asks for detail.
 
 Database context:
 ${schemaContext || 'No schema available'}`;
@@ -155,7 +158,8 @@ ${schemaContext || 'No schema available'}`;
     { role: 'user', content: `Explain this SQL:\n${sqlToExplain}` },
   ];
 
-  const { provider, model } = getModelForTier('fast');
+  // Use balanced tier for SQL explanation (Anthropic preferred)
+  const { provider, model } = getModelForTier('balanced');
   let fullContent = '';
   let tokenUsage = { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
 
@@ -179,10 +183,10 @@ ${schemaContext || 'No schema available'}`;
           if (!res.writableEnded) {
             res.write(`data: ${JSON.stringify({ type: 'error', error: error.message })}\n\n`);
           }
-          resolve({ intent: 'sql_explanation', content: '', tokenUsage });
+          resolve({ intent: 'sql_explanation', content: '', model, provider, tokenUsage });
         },
         onComplete: () => {
-          resolve({ intent: 'sql_explanation', content: fullContent, tokenUsage });
+          resolve({ intent: 'sql_explanation', content: fullContent, model, provider, tokenUsage });
         },
       },
       { provider, model }
@@ -235,10 +239,10 @@ async function handleClarification(
           if (!res.writableEnded) {
             res.write(`data: ${JSON.stringify({ type: 'error', error: error.message })}\n\n`);
           }
-          resolve({ intent: 'clarification', content: '', tokenUsage });
+          resolve({ intent: 'clarification', content: '', model, provider, tokenUsage });
         },
         onComplete: () => {
-          resolve({ intent: 'clarification', content: fullContent, tokenUsage });
+          resolve({ intent: 'clarification', content: fullContent, model, provider, tokenUsage });
         },
       },
       { provider, model }
@@ -292,10 +296,10 @@ async function handleGeneralChat(
           if (!res.writableEnded) {
             res.write(`data: ${JSON.stringify({ type: 'error', error: error.message })}\n\n`);
           }
-          resolve({ intent, content: '', tokenUsage });
+          resolve({ intent, content: '', model, provider, tokenUsage });
         },
         onComplete: () => {
-          resolve({ intent, content: fullContent, tokenUsage });
+          resolve({ intent, content: fullContent, model, provider, tokenUsage });
         },
       },
       { provider, model }

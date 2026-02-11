@@ -282,6 +282,7 @@ export interface TableColumnDef {
   max_length?: number;
   numeric_precision?: number;
   column_comment?: string;
+  enum_values?: string[];      // Enum labels for USER-DEFINED enum types
 }
 
 export interface IndexDef {

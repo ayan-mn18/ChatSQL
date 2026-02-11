@@ -13,15 +13,17 @@ import {
   StreamCallback,
   ModelTier,
   MODEL_CONFIG,
+  TIER_PROVIDER_PREFERENCE,
 } from './types';
 import { getOpenAIProvider } from './openai.provider';
 import { getGeminiProvider } from './gemini.provider';
+import { getAnthropicProvider } from './anthropic.provider';
 
 // Re-export types for convenience
 export * from './types';
 
-// Default provider preference order
-const PROVIDER_PREFERENCE: LLMProvider[] = ['gemini', 'openai'];
+// Default provider preference order (general fallback)
+const PROVIDER_PREFERENCE: LLMProvider[] = ['gemini', 'anthropic', 'openai'];
 
 // Provider registry
 const providers: Map<LLMProvider, ILLMProvider> = new Map();
@@ -31,10 +33,16 @@ function initializeProviders(): void {
 
   const gemini = getGeminiProvider();
   const openai = getOpenAIProvider();
+  const anthropic = getAnthropicProvider();
 
   if (gemini.isAvailable()) {
     providers.set('gemini', gemini);
     logger.info('[LLM] Gemini provider initialized');
+  }
+
+  if (anthropic.isAvailable()) {
+    providers.set('anthropic', anthropic);
+    logger.info('[LLM] Anthropic provider initialized');
   }
 
   if (openai.isAvailable()) {
@@ -44,6 +52,8 @@ function initializeProviders(): void {
 
   if (providers.size === 0) {
     logger.warn('[LLM] No LLM providers available! Check API keys.');
+  } else {
+    logger.info(`[LLM] ${providers.size} provider(s) ready: ${Array.from(providers.keys()).join(', ')}`);
   }
 }
 
@@ -72,7 +82,10 @@ export function getBestProvider(): ILLMProvider {
 }
 
 /**
- * Get model name for a specific tier and provider
+ * Get model name for a specific tier and provider.
+ * Uses smart tier-based provider selection:
+ * - fast tier → prefers Gemini (cheapest, fastest)
+ * - balanced/powerful tier → prefers Anthropic (best SQL quality)
  */
 export function getModelForTier(
   tier: ModelTier,
@@ -80,15 +93,34 @@ export function getModelForTier(
 ): { provider: LLMProvider; model: string } {
   initializeProviders();
 
-  const targetProvider = provider || PROVIDER_PREFERENCE.find(p => providers.get(p)?.isAvailable());
+  let targetProvider: LLMProvider | undefined;
+
+  if (provider) {
+    // Explicit provider requested
+    targetProvider = providers.get(provider)?.isAvailable() ? provider : undefined;
+  }
+
+  if (!targetProvider) {
+    // Use tier-specific provider preference
+    const tierPreference = TIER_PROVIDER_PREFERENCE[tier] || PROVIDER_PREFERENCE;
+    targetProvider = tierPreference.find(p => providers.get(p)?.isAvailable());
+  }
+
+  if (!targetProvider) {
+    // Final fallback: any available provider
+    targetProvider = PROVIDER_PREFERENCE.find(p => providers.get(p)?.isAvailable());
+  }
   
   if (!targetProvider) {
     throw new Error('No LLM providers available');
   }
 
+  const model = MODEL_CONFIG[targetProvider][tier];
+  logger.debug(`[LLM] Tier '${tier}' → provider '${targetProvider}' → model '${model}'`);
+
   return {
     provider: targetProvider,
-    model: MODEL_CONFIG[targetProvider][tier],
+    model,
   };
 }
 

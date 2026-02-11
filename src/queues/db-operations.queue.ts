@@ -397,11 +397,11 @@ function buildWhereClause(filters: FilterCondition[]): { clause: string; replace
         replacements[paramName] = filter.value;
         break;
       case 'like':
-        conditions.push(`${quotedColumn} LIKE :${paramName}`);
+        conditions.push(`CAST(${quotedColumn} AS TEXT) LIKE :${paramName}`);
         replacements[paramName] = `%${filter.value}%`;
         break;
       case 'ilike':
-        conditions.push(`${quotedColumn} ILIKE :${paramName}`);
+        conditions.push(`CAST(${quotedColumn} AS TEXT) ILIKE :${paramName}`);
         replacements[paramName] = `%${filter.value}%`;
         break;
       case 'in':

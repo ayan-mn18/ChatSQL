@@ -2,6 +2,13 @@ import { Router } from 'express';
 import { authenticate, heavyRateLimit } from '../middleware';
 import * as chatController from '../controllers/chat.controller';
 import { handleStreamChat } from '../controllers/streaming-chat.controller';
+import {
+  handleAgentStart,
+  handleAgentApprove,
+  handleAgentReject,
+  handleAgentResult,
+  handleAgentStop,
+} from '../controllers/agent.controller';
 
 const router = Router();
 
@@ -77,6 +84,70 @@ router.delete(
   '/:connectionId/session/:sessionId',
   authenticate,
   chatController.deleteChatSession
+);
+
+// ============================================
+// AGENT MODE ROUTES
+// ============================================
+
+/**
+ * @route   POST /api/chat/:connectionId/agent/start
+ * @desc    Start an agent session (SSE stream)
+ * @access  Private
+ * @body    { message: string, sessionId?: string, selectedSchemas?: string[] }
+ */
+router.post(
+  '/:connectionId/agent/start',
+  authenticate,
+  heavyRateLimit,
+  handleAgentStart
+);
+
+/**
+ * @route   POST /api/chat/:connectionId/agent/:agentSessionId/approve
+ * @desc    Approve the agent's proposed query
+ * @access  Private
+ * @body    { modifiedSql?: string }
+ */
+router.post(
+  '/:connectionId/agent/:agentSessionId/approve',
+  authenticate,
+  handleAgentApprove
+);
+
+/**
+ * @route   POST /api/chat/:connectionId/agent/:agentSessionId/reject
+ * @desc    Reject the agent's proposed query
+ * @access  Private
+ * @body    { reason?: string }
+ */
+router.post(
+  '/:connectionId/agent/:agentSessionId/reject',
+  authenticate,
+  handleAgentReject
+);
+
+/**
+ * @route   POST /api/chat/:connectionId/agent/:agentSessionId/result
+ * @desc    Provide query execution results to the agent
+ * @access  Private
+ * @body    { result: AgentExecutionResult }
+ */
+router.post(
+  '/:connectionId/agent/:agentSessionId/result',
+  authenticate,
+  handleAgentResult
+);
+
+/**
+ * @route   POST /api/chat/:connectionId/agent/:agentSessionId/stop
+ * @desc    Stop the agent session
+ * @access  Private
+ */
+router.post(
+  '/:connectionId/agent/:agentSessionId/stop',
+  authenticate,
+  handleAgentStop
 );
 
 export default router;

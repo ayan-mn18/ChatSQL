@@ -21,17 +21,18 @@ const DEFAULT_MODEL = MODEL_CONFIG.anthropic.balanced;
 
 // Model fallback chain for resilience
 const MODEL_FALLBACKS = [
+  'claude-sonnet-4-5-20250929',
+  'claude-sonnet-4-5',
   'claude-sonnet-4-20250514',
-  'claude-3-5-sonnet-latest',
   'claude-3-7-sonnet-latest',
-  'claude-3-5-sonnet-20241022',
-  'claude-3-5-sonnet-20240620',
+  'claude-3-5-sonnet-latest',
 ];
 
 const FAST_MODEL_FALLBACKS = [
+  'claude-haiku-4-5-20251001',
+  'claude-haiku-4-5',
   'claude-3-5-haiku-latest',
   'claude-3-5-haiku-20241022',
-  'claude-3-haiku-20240307',
 ];
 
 export class AnthropicProvider implements ILLMProvider {

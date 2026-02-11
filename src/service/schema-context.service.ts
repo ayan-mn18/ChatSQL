@@ -84,12 +84,17 @@ async function fetchSchemaFromDatabase(
   connectionId: string,
   selectedSchemas: string[]
 ): Promise<SchemaContext> {
-  // Get connection details
+  // Get connection details (individual columns, not a connection string)
   const [connection] = await sequelize.query<{
-    connection_string: string;
-    db_type: string;
+    host: string;
+    port: number;
+    db_name: string;
+    username: string;
+    password_enc: string;
+    ssl: boolean;
   }>(
-    `SELECT connection_string, db_type FROM connections WHERE id = :connectionId`,
+    `SELECT host, port, db_name, username, password_enc, ssl 
+     FROM connections WHERE id = :connectionId`,
     { replacements: { connectionId }, type: QueryTypes.SELECT }
   );
 
@@ -97,12 +102,24 @@ async function fetchSchemaFromDatabase(
     throw new Error('Connection not found');
   }
 
-  // Decrypt and connect to user's database
-  const connectionString = decrypt(connection.connection_string);
-  const userDB = new Sequelize(connectionString, {
+  // Decrypt password and connect to user's database
+  const password = decrypt(connection.password_enc);
+  const userDB = new Sequelize({
+    dialect: 'postgres',
+    host: connection.host,
+    port: connection.port,
+    database: connection.db_name,
+    username: connection.username,
+    password,
     logging: false,
-    dialectOptions: {
-      ssl: connectionString.includes('sslmode=require') ? { rejectUnauthorized: false } : undefined,
+    dialectOptions: connection.ssl ? {
+      ssl: { require: true, rejectUnauthorized: false },
+    } : {},
+    pool: {
+      max: 2,
+      min: 0,
+      acquire: 30000,
+      idle: 10000,
     },
   });
 

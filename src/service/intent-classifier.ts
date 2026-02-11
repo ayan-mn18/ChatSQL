@@ -27,9 +27,11 @@ Classify the user's message into ONE of these intents:
 - sql_generation: User wants to generate/write a SQL query
 - sql_explanation: User wants to understand/explain existing SQL code
 - clarification: The request is unclear and needs more information before generating SQL
-- follow_up: User is asking about or modifying a previous query
+- follow_up: User is responding to a previous query result, pasting an error from running a query, asking to modify/fix a previous query, or continuing the conversation about a previous query. This includes SQL error messages like "relation does not exist", "column not found", "syntax error", "permission denied", etc.
 - general_chat: General questions about databases, schemas, or the tool
 - off_topic: Not related to databases or SQL at all
+
+IMPORTANT: If the user pastes a database/SQL error message, it is almost always a follow_up on a previous query they ran. NEVER classify error messages as general_chat or off_topic.
 
 Respond with ONLY a JSON object:
 {
@@ -112,10 +114,12 @@ function fallbackClassification(message: string): IntentResult {
     'break down', 'describe this'
   ];
 
-  // Follow-up keywords
+  // Follow-up keywords (including SQL error patterns)
   const followUpKeywords = [
     'also', 'and add', 'modify', 'change it', 'instead', 'but',
-    'what about', 'same but', 'previous', 'last query'
+    'what about', 'same but', 'previous', 'last query',
+    'does not exist', 'not found', 'syntax error', 'error',
+    'permission denied', 'fix', 'wrong', 'incorrect', 'try again'
   ];
 
   // Check for SQL code in message
@@ -160,9 +164,17 @@ export function isLikelySqlRelated(message: string): boolean {
   const lower = message.toLowerCase();
   
   const sqlIndicators = [
+    // SQL keywords
     'sql', 'query', 'table', 'database', 'select', 'insert', 'update',
     'delete', 'join', 'where', 'group by', 'order by', 'schema',
-    'column', 'row', 'record', 'data', 'fetch', 'retrieve'
+    'column', 'row', 'record', 'data', 'fetch', 'retrieve',
+    // SQL error patterns - critical for follow-up detection
+    'relation', 'does not exist', 'not found', 'syntax error',
+    'permission denied', 'violates', 'constraint', 'duplicate key',
+    'null value', 'error', 'failed', 'invalid', 'cannot', 'undefined',
+    // Follow-up patterns
+    'fix', 'wrong', 'incorrect', 'try again', 'instead', 'modify',
+    'change', 'correct', 'adjust'
   ];
 
   return sqlIndicators.some(indicator => lower.includes(indicator));

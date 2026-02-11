@@ -76,9 +76,9 @@ export const MODEL_CONFIG: Record<LLMProvider, Record<ModelTier, string>> = {
     powerful: 'gemini-1.5-pro',              // Most capable
   },
   anthropic: {
-    fast: 'claude-3-5-haiku-latest',          // Cheap, fast
-    balanced: 'claude-sonnet-4-20250514',     // Strong SQL generation
-    powerful: 'claude-sonnet-4-20250514',     // Best for complex SQL & agent tasks
+    fast: 'claude-haiku-4-5-20251001',        // Fast, cheap
+    balanced: 'claude-sonnet-4-5-20250929',   // Strong SQL generation
+    powerful: 'claude-sonnet-4-5-20250929',   // Best for complex SQL & agent tasks
   },
 };
 

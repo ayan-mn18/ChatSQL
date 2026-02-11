@@ -57,21 +57,23 @@ export async function streamChatResponse(
 ): Promise<StreamChatResult> {
   const { schemaContext, chatHistory, connectionId } = config;
 
-  // Quick check if SQL-related
+  // Check if SQL-related or if there's conversation history (follow-ups need context)
   const likelySql = isLikelySqlRelated(message);
+  const hasConversation = chatHistory && chatHistory.length > 1;
 
   // Classify intent (uses fast model)
+  // Always classify with LLM if there's conversation history OR if message seems SQL-related
+  // This ensures error messages and follow-ups are properly detected
   let intent: ChatIntent;
   
-  if (likelySql) {
-    // For obviously SQL-related messages, skip full classification
+  if (likelySql || hasConversation) {
     const result = await classifyIntent(message, {
-      recentMessages: chatHistory?.slice(-3).map(m => ({ role: m.role, content: m.content })),
+      recentMessages: chatHistory?.slice(-4).map(m => ({ role: m.role, content: m.content })),
       hasSchema: !!schemaContext,
     });
     intent = result.intent;
   } else {
-    // Quick fallback for non-SQL messages
+    // Only skip classification for very first messages that are clearly not SQL
     intent = 'general_chat';
   }
 

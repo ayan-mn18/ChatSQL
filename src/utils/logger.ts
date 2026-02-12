@@ -18,13 +18,42 @@ class Logger {
 
   constructor() {
     const token = process.env.BETTERSTACK_SOURCE_TOKEN;
-    if (token) {
-      this.logtail = new Logtail(token, {
-        batchSize: 10,
-        batchInterval: 1000,
-        retryCount: 3,
-        sendLogsToBetterStack: true,
-      });
+    if (token && token.trim().length > 0) {
+      try {
+        this.logtail = new Logtail(token, {
+          batchSize: 10,
+          batchInterval: 1000,
+          retryCount: 3,
+          sendLogsToBetterStack: true,
+        });
+
+        // Suppress Logtail sync errors (e.g. invalid/expired token)
+        // so they don't flood the console
+        this.logtail.setSync(async (logs) => {
+          try {
+            const res = await fetch('https://in.logs.betterstack.com', {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                Authorization: `Bearer ${token}`,
+              },
+              body: JSON.stringify(logs),
+            });
+            if (!res.ok) {
+              // Token is invalid — disable Logtail silently
+              if (res.status === 401 || res.status === 403) {
+                console.warn('[Logger] BetterStack token is invalid or expired. Disabling remote logging.');
+                this.logtail = null;
+              }
+            }
+          } catch {
+            // Network error — silently ignore
+          }
+          return logs;
+        });
+      } catch {
+        this.logtail = null;
+      }
     }
   }
 

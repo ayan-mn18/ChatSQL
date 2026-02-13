@@ -47,6 +47,27 @@ const CLARIFICATION_SYSTEM_PROMPT = `You are a database assistant. The user's re
 Ask ONE brief, specific clarifying question. Keep it under 2 sentences.`;
 
 /**
+ * Convert chat history into proper user/assistant LLM message turns.
+ * This gives the model real multi-turn conversation awareness
+ * instead of a flattened text summary in a system message.
+ */
+function buildChatHistoryMessages(chatHistory?: ChatMessage[]): LLMChatMessage[] {
+  if (!chatHistory?.length) return [];
+
+  return chatHistory
+    .slice(-10) // Last 10 messages for rich conversational context
+    .filter(msg => msg.role === 'user' || msg.role === 'assistant')
+    .map(msg => {
+      let content = msg.content;
+      // Cap individual message length to avoid token blowup
+      if (content.length > 2000) {
+        content = content.substring(0, 2000) + '\n... (truncated)';
+      }
+      return { role: msg.role as 'user' | 'assistant', content };
+    });
+}
+
+/**
  * Stream a chat response to the client
  * Routes to appropriate handler based on intent
  */
@@ -206,16 +227,19 @@ async function handleClarification(
 ): Promise<StreamChatResult> {
   const { schemaContext, chatHistory } = config;
 
-  const recentContext = chatHistory?.slice(-4).map(m => 
-    `${m.role === 'user' ? 'User' : 'Assistant'}: ${m.content.substring(0, 200)}`
-  ).join('\n') || '';
+  const historyMsgs = buildChatHistoryMessages(chatHistory);
 
   const messages: LLMChatMessage[] = [
     { role: 'system', content: CLARIFICATION_SYSTEM_PROMPT },
     { role: 'system', content: `Available tables: ${schemaContext?.substring(0, 500) || 'Unknown'}` },
-    ...(recentContext ? [{ role: 'system' as const, content: `Recent conversation:\n${recentContext}` }] : []),
-    { role: 'user', content: message },
+    ...historyMsgs,
   ];
+
+  // Add current message (deduplicate if last history entry is identical)
+  const lastMsg = historyMsgs[historyMsgs.length - 1];
+  if (!lastMsg || lastMsg.role !== 'user' || lastMsg.content.trim() !== message.trim()) {
+    messages.push({ role: 'user', content: message });
+  }
 
   const { provider, model } = getModelForTier('fast');
   let fullContent = '';
@@ -263,16 +287,19 @@ async function handleGeneralChat(
 ): Promise<StreamChatResult> {
   const { schemaContext, chatHistory } = config;
 
-  const recentContext = chatHistory?.slice(-4).map(m => 
-    `${m.role === 'user' ? 'User' : 'Assistant'}: ${m.content.substring(0, 200)}`
-  ).join('\n') || '';
+  const historyMsgs = buildChatHistoryMessages(chatHistory);
 
   const messages: LLMChatMessage[] = [
     { role: 'system', content: GENERAL_CHAT_SYSTEM_PROMPT },
     ...(schemaContext ? [{ role: 'system' as const, content: `Database schema summary: ${schemaContext.substring(0, 1000)}` }] : []),
-    ...(recentContext ? [{ role: 'system' as const, content: `Recent conversation:\n${recentContext}` }] : []),
-    { role: 'user', content: message },
+    ...historyMsgs,
   ];
+
+  // Add current message (deduplicate if last history entry is identical)
+  const lastMsg = historyMsgs[historyMsgs.length - 1];
+  if (!lastMsg || lastMsg.role !== 'user' || lastMsg.content.trim() !== message.trim()) {
+    messages.push({ role: 'user', content: message });
+  }
 
   const { provider, model } = getModelForTier('fast');
   let fullContent = '';

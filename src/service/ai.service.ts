@@ -429,7 +429,7 @@ export async function generateSqlFromPrompt(
   const metadata = await generateDbMetadata(connectionId, selectedSchemas);
   const metadataStr = JSON.stringify(metadata);
 
-  // Chat history context (very important for intent/constraints)
+  // Chat history context — flat text for the prompt, plus multi-turn contents for Gemini
   const conversationContext = formatChatHistoryForSqlGeneration(options?.chatHistory, prompt);
   
   // Extract relevant parts for the query
@@ -454,8 +454,35 @@ export async function generateSqlFromPrompt(
     userRequest: prompt,
   });
 
+  // Build proper multi-turn Gemini contents with chat history as real turns
+  const geminiContents: Array<{ role: string; parts: Array<{ text: string }> }> = [];
+  
+  // Add chat history as proper user/model turns for Gemini's multi-turn awareness
+  if (options?.chatHistory?.length) {
+    const historySlice = options.chatHistory.slice(-10);
+    for (const msg of historySlice) {
+      if (msg.role === 'user' || msg.role === 'assistant') {
+        let content = msg.content;
+        if (msg.role === 'assistant' && msg.sqlGenerated) {
+          content += '\n\n```sql\n' + msg.sqlGenerated + '\n```';
+        }
+        if (content.length > 2000) {
+          content = content.substring(0, 2000) + '\n... (truncated)';
+        }
+        // Gemini uses 'model' instead of 'assistant'
+        geminiContents.push({
+          role: msg.role === 'assistant' ? 'model' : 'user',
+          parts: [{ text: content }],
+        });
+      }
+    }
+  }
+  
+  // Add the system prompt + current request as the final user turn
+  geminiContents.push({ role: 'user', parts: [{ text: sqlPrompt }] });
+
   const response = await generateGeminiTextWithUsage({
-    contents: [{ role: 'user', parts: [{ text: sqlPrompt }] }],
+    contents: geminiContents,
     generationConfig: {
       temperature: 0.1,
     },

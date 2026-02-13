@@ -67,23 +67,27 @@ Error handling:
 Be direct. Query first, talk later.`;
 
 /**
- * Build conversation context from chat history
+ * Build conversation history as proper user/assistant message turns for the LLM.
+ * This gives the model real multi-turn awareness instead of a flattened text summary.
  */
-function buildConversationContext(chatHistory?: ChatMessage[]): string {
-  if (!chatHistory?.length) return '';
+function buildHistoryMessages(chatHistory?: ChatMessage[]): LLMChatMessage[] {
+  if (!chatHistory?.length) return [];
 
-  const relevant = chatHistory.slice(-6); // Last 6 messages for context
-  
-  return relevant
+  return chatHistory
+    .slice(-10) // Last 10 messages for rich conversational context
+    .filter(msg => msg.role === 'user' || msg.role === 'assistant')
     .map(msg => {
-      const role = msg.role === 'user' ? 'User' : 'Assistant';
-      // Truncate long messages
-      const content = msg.content.length > 500 
-        ? msg.content.substring(0, 500) + '...'
-        : msg.content;
-      return `${role}: ${content}`;
-    })
-    .join('\n\n');
+      let content = msg.content;
+      // For assistant messages that generated SQL, include it for continuity
+      if (msg.role === 'assistant' && msg.sqlGenerated) {
+        content = content + '\n\n```sql\n' + msg.sqlGenerated + '\n```';
+      }
+      // Cap individual message length to avoid token blowup
+      if (content.length > 2000) {
+        content = content.substring(0, 2000) + '\n... (truncated)';
+      }
+      return { role: msg.role as 'user' | 'assistant', content };
+    });
 }
 
 /**
@@ -112,12 +116,13 @@ async function getSchemaContext(
 }
 
 /**
- * Build the full prompt for SQL generation
+ * Build the full prompt for SQL generation.
+ * Includes schema as system context and conversation history as proper user/assistant turns.
  */
 function buildPrompt(
   userMessage: string,
   schemaContext: string,
-  conversationContext: string
+  chatHistory?: ChatMessage[]
 ): LLMChatMessage[] {
   const messages: LLMChatMessage[] = [
     { role: 'system', content: SQL_GENERATOR_SYSTEM_PROMPT },
@@ -131,16 +136,17 @@ function buildPrompt(
     });
   }
 
-  // Add conversation context if available
-  if (conversationContext) {
-    messages.push({
-      role: 'system',
-      content: `Previous conversation:\n${conversationContext}`,
-    });
+  // Add conversation history as proper user/assistant turns
+  const historyMsgs = buildHistoryMessages(chatHistory);
+  if (historyMsgs.length > 0) {
+    messages.push(...historyMsgs);
   }
 
-  // Add user message
-  messages.push({ role: 'user', content: userMessage });
+  // Add current user message (deduplicate if last history entry is identical)
+  const lastMsg = historyMsgs[historyMsgs.length - 1];
+  if (!lastMsg || lastMsg.role !== 'user' || lastMsg.content !== userMessage) {
+    messages.push({ role: 'user', content: userMessage });
+  }
 
   return messages;
 }
@@ -154,8 +160,7 @@ export async function streamSqlGeneration(
   config: SqlGeneratorConfig
 ): Promise<SqlGenerationResult> {
   const { streamToResponse: res, chatHistory } = config;
-  const conversationContext = buildConversationContext(chatHistory);
-  const messages = buildPrompt(userMessage, schemaContext, conversationContext);
+  const messages = buildPrompt(userMessage, schemaContext, chatHistory);
 
   // Use balanced tier for SQL generation (prefers Anthropic for quality)
   const { provider, model } = getModelForTier('balanced');
@@ -235,8 +240,7 @@ export async function generateSql(
   schemaContext: string,
   chatHistory?: ChatMessage[]
 ): Promise<SqlGenerationResult> {
-  const conversationContext = buildConversationContext(chatHistory);
-  const messages = buildPrompt(userMessage, schemaContext, conversationContext);
+  const messages = buildPrompt(userMessage, schemaContext, chatHistory);
 
   // Get balanced model for SQL generation (prefers Anthropic)
   const { provider, model } = getModelForTier('balanced');

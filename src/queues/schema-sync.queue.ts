@@ -16,7 +16,7 @@ import { sequelize } from '../config/db';
 import { decrypt } from '../utils/encryption';
 import { logger } from '../utils/logger';
 import { TableColumnDef, IndexDef } from '../types';
-import { setCache, CACHE_TTL, CACHE_KEYS, invalidateConnectionsListCache } from '../utils/cache';
+import { setCache, CACHE_TTL, CACHE_KEYS, invalidateConnectionsListCache, invalidateViewerCache } from '../utils/cache';
 
 // ============================================
 // SCHEMA SYNC QUEUE
@@ -227,19 +227,23 @@ export async function publishJobError(userId: string, jobId: string, connectionI
 
 /**
  * Warm the cache with schema data after sync completes
- * This pre-populates commonly accessed data for faster subsequent requests
+ * This pre-populates commonly accessed data for faster subsequent requests:
+ * - Schema list
+ * - Full table data per schema (with columns, indexes, etc.)
+ * - Lightweight table-tree (all schemas → table names, for sidebar)
+ * - ERD relations
+ * Also invalidates stale viewer caches so viewers get fresh data on next request
  */
 async function warmSchemaCache(connectionId: string, userId: string): Promise<void> {
   try {
     logger.info(`[CACHE_WARM] Starting cache warming for connection ${connectionId}`);
 
-    // Fetch and cache schemas
-    const schemas = await sequelize.query<{ schema_name: string; table_count: number }>(
-      `SELECT ds.schema_name, 
-              (SELECT COUNT(*) FROM table_schemas ts WHERE ts.database_schema_id = ds.id) as table_count
-       FROM database_schemas ds 
-       WHERE ds.connection_id = $1 
-       ORDER BY ds.schema_name`,
+    // Fetch schemas from the app DB (these were just written by the sync worker)
+    const schemas = await sequelize.query<{ id: string; schema_name: string; is_selected: boolean; table_count: number; description: string | null; last_synced_at: string }>(
+      `SELECT id, schema_name, is_selected, table_count, description, last_synced_at
+       FROM database_schemas 
+       WHERE connection_id = $1 
+       ORDER BY CASE WHEN schema_name = 'public' THEN 0 ELSE 1 END, schema_name`,
       { bind: [connectionId], type: QueryTypes.SELECT }
     );
     
@@ -250,24 +254,47 @@ async function warmSchemaCache(connectionId: string, userId: string): Promise<vo
     );
     logger.debug(`[CACHE_WARM] Cached ${schemas.length} schemas for connection ${connectionId}`);
 
-    // For each schema, fetch and cache tables
+    // Build table-tree (lightweight: schema → table names only) AND full table caches
+    const tableTree: Array<{ schema_name: string; table_count: number; tables: Array<{ table_name: string; table_type: string }> }> = [];
+
     for (const schema of schemas) {
-      const tables = await sequelize.query<{ table_name: string; table_type: string }>(
-        `SELECT ts.table_name, ts.table_type
-         FROM table_schemas ts
-         JOIN database_schemas ds ON ts.database_schema_id = ds.id
-         WHERE ds.connection_id = $1 AND ds.schema_name = $2
-         ORDER BY ts.table_name`,
+      // Full table data (columns, indexes, PKs) for per-schema cache
+      const fullTables = await sequelize.query(
+        `SELECT id, connection_id, database_schema_id, schema_name, table_name, table_type,
+                columns, primary_key_columns, indexes, row_count, table_size_bytes,
+                description, last_fetched_at, created_at, updated_at
+         FROM table_schemas
+         WHERE connection_id = $1 AND schema_name = $2
+         ORDER BY table_name`,
         { bind: [connectionId, schema.schema_name], type: QueryTypes.SELECT }
       );
       
+      // Cache full table data per schema (used by getTablesBySchema endpoint)
       await setCache(
         CACHE_KEYS.tables(connectionId, schema.schema_name),
-        tables,
+        fullTables,
         CACHE_TTL.TABLES
       );
+
+      // Build lightweight tree entry (sidebar only needs name + type)
+      tableTree.push({
+        schema_name: schema.schema_name,
+        table_count: (fullTables as any[]).length,
+        tables: (fullTables as any[]).map((t: any) => ({
+          table_name: t.table_name,
+          table_type: t.table_type,
+        })),
+      });
     }
     logger.debug(`[CACHE_WARM] Cached tables for all schemas`);
+
+    // Cache the lightweight table-tree (single key for entire sidebar)
+    await setCache(
+      CACHE_KEYS.tableTree(connectionId),
+      tableTree,
+      CACHE_TTL.TABLES
+    );
+    logger.debug(`[CACHE_WARM] Cached table-tree with ${tableTree.length} schemas`);
 
     // Fetch and cache ERD relations
     const erdRelations = await sequelize.query(
@@ -283,6 +310,9 @@ async function warmSchemaCache(connectionId: string, userId: string): Promise<vo
       CACHE_TTL.ERD_RELATIONS
     );
     logger.debug(`[CACHE_WARM] Cached ${erdRelations.length} ERD relations`);
+
+    // Invalidate viewer-specific caches so viewers get fresh data on next request
+    await invalidateViewerCache(userId, connectionId);
 
     // Invalidate connections list cache since schema_synced status changed
     await invalidateConnectionsListCache(userId);

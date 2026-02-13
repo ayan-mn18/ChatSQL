@@ -75,6 +75,14 @@ router.post('/:id/sync-schema', authenticate, heavyRateLimit, validate(uuidParam
 router.get('/:id/schemas', authenticate, connectionController.getSchemas);
 
 /**
+ * @route   GET /api/connections/:id/table-tree
+ * @desc    Get lightweight tree of all schemas → table names (for sidebar)
+ * @access  Private
+ * @returns Single response with all schemas and their table names/types
+ */
+router.get('/:id/table-tree', authenticate, connectionController.getTableTree);
+
+/**
  * @route   PUT /api/connections/:id/schemas
  * @desc    Update which schemas are selected for use
  * @access  Private

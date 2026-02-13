@@ -1066,6 +1066,130 @@ export const syncSchema = async (req: Request, res: Response): Promise<void> => 
 };
 
 /**
+ * @route   GET /api/connections/:id/table-tree
+ * @desc    Get lightweight tree of all schemas with table names (for sidebar)
+ * @access  Private
+ * 
+ * Returns a single response with all schemas and their table names/types.
+ * This replaces N+1 individual calls (1 getSchemas + N getTablesBySchema).
+ * Does NOT include columns, indexes, or other heavy data — those are fetched
+ * on-demand when a user clicks a specific table.
+ */
+export const getTableTree = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const { id } = req.params;
+    const userId = req.userId;
+    const userRole = req.userRole;
+    logger.info(`[CONNECTION] Get table-tree request for connection: ${id}`);
+
+    // 1. Verify access
+    let hasAccess = false;
+    if (userRole === 'viewer') {
+      hasAccess = await viewerHasConnectionAccess(userId!, id);
+    } else {
+      const [connectionResult] = await sequelize.query<{ id: string }>(
+        `SELECT id FROM connections WHERE id = :id AND user_id = :userId`,
+        { replacements: { id, userId }, type: QueryTypes.SELECT }
+      );
+      hasAccess = !!connectionResult;
+    }
+
+    if (!hasAccess) {
+      logger.warn(`[CONNECTION] Table-tree: connection not found or unauthorized: ${id}`);
+      res.status(404).json({ success: false, error: 'Connection not found', code: 'CONNECTION_NOT_FOUND' });
+      return;
+    }
+
+    // 2. Check Redis cache (viewer-specific key to respect permissions)
+    const cacheKey = userRole === 'viewer'
+      ? `viewer:${userId}:${CACHE_KEYS.tableTree(id)}`
+      : CACHE_KEYS.tableTree(id);
+    const cached = await getFromCache<any[]>(cacheKey);
+
+    if (cached) {
+      logger.info(`[CONNECTION] Returning cached table-tree for connection: ${id}`);
+      res.json({ success: true, data: cached.data, cached: true, cachedAt: cached.cachedAt });
+      return;
+    }
+
+    // 3. Cache miss — single query joins schemas + tables
+    const rows = await sequelize.query<{
+      schema_name: string;
+      is_selected: boolean;
+      table_count: number;
+      description: string | null;
+      last_synced_at: string;
+      table_name: string | null;
+      table_type: string | null;
+    }>(
+      `SELECT 
+         ds.schema_name,
+         ds.is_selected,
+         ds.table_count,
+         ds.description,
+         ds.last_synced_at,
+         ts.table_name,
+         ts.table_type
+       FROM database_schemas ds
+       LEFT JOIN table_schemas ts ON ts.connection_id = ds.connection_id AND ts.schema_name = ds.schema_name
+       WHERE ds.connection_id = :connectionId
+       ORDER BY
+         CASE WHEN ds.schema_name = 'public' THEN 0 ELSE 1 END,
+         ds.schema_name,
+         ts.table_name`,
+      { replacements: { connectionId: id }, type: QueryTypes.SELECT }
+    );
+
+    // 4. Group rows into tree structure
+    const schemaMap = new Map<string, { schema_name: string; is_selected: boolean; table_count: number; description: string | null; last_synced_at: string; tables: Array<{ table_name: string; table_type: string }> }>();
+    for (const row of rows) {
+      if (!schemaMap.has(row.schema_name)) {
+        schemaMap.set(row.schema_name, {
+          schema_name: row.schema_name,
+          is_selected: row.is_selected,
+          table_count: row.table_count,
+          description: row.description,
+          last_synced_at: row.last_synced_at,
+          tables: [],
+        });
+      }
+      if (row.table_name) {
+        schemaMap.get(row.schema_name)!.tables.push({
+          table_name: row.table_name,
+          table_type: row.table_type!,
+        });
+      }
+    }
+    let tree = Array.from(schemaMap.values());
+
+    // 5. For viewers, filter by permissions
+    if (userRole === 'viewer') {
+      const { schemas: allowedSchemas, hasFullAccess: schemaFullAccess } = await getViewerAllowedSchemas(userId!, id);
+      if (!schemaFullAccess && allowedSchemas) {
+        tree = tree.filter(s => allowedSchemas.includes(s.schema_name));
+      }
+      // Also filter tables within each allowed schema
+      for (const schema of tree) {
+        const { tables: allowedTables, hasFullAccess: tableFullAccess } = await getViewerAllowedTables(userId!, id, schema.schema_name);
+        if (!tableFullAccess && allowedTables) {
+          schema.tables = schema.tables.filter(t => allowedTables.includes(t.table_name));
+          schema.table_count = schema.tables.length;
+        }
+      }
+    }
+
+    // 6. Cache and return
+    await setCache(cacheKey, tree, CACHE_TTL.TABLES);
+
+    logger.info(`[CONNECTION] Built table-tree for connection ${id}: ${tree.length} schemas`);
+    res.json({ success: true, data: tree, cached: false });
+  } catch (error: any) {
+    logger.error('[CONNECTION] Get table-tree failed:', error);
+    res.status(500).json({ success: false, error: error.message || 'Failed to get table tree', code: 'TABLE_TREE_ERROR' });
+  }
+};
+
+/**
  * @route   GET /api/connections/:id/schemas
  * @desc    Get all PostgreSQL schemas for a connection (with Redis caching)
  * @access  Private

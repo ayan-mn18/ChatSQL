@@ -42,6 +42,7 @@ export const CACHE_KEYS = {
   tableColumns: (connectionId: string, schemaName: string, tableName: string) => 
     `connection:${connectionId}:schema:${schemaName}:table:${tableName}:columns`,
   erdRelations: (connectionId: string) => `connection:${connectionId}:relations`,
+  tableTree: (connectionId: string) => `connection:${connectionId}:table-tree`,
   
   // Connection
   connection: (connectionId: string) => `connection:${connectionId}:details`,
@@ -142,14 +143,28 @@ export async function deleteCache(key: string): Promise<boolean> {
 export async function invalidateConnectionCache(connectionId: string): Promise<void> {
   try {
     const redis = getRedisClient();
-    
-    // Find and delete all keys for this connection
-    const pattern = `connection:${connectionId}:*`;
-    const keys = await redis.keys(pattern);
-    
-    if (keys.length > 0) {
-      await redis.del(...keys);
-      logger.info(`[CACHE] Invalidated ${keys.length} cache keys for connection: ${connectionId}`);
+    let totalDeleted = 0;
+
+    // Non-blocking SCAN for connection keys (avoids O(N) KEYS command)
+    const patterns = [
+      `connection:${connectionId}:*`,
+      `viewer:*:connection:${connectionId}:*`,
+    ];
+
+    for (const pattern of patterns) {
+      let cursor = '0';
+      do {
+        const [nextCursor, keys] = await redis.scan(cursor, 'MATCH', pattern, 'COUNT', 100);
+        cursor = nextCursor;
+        if (keys.length > 0) {
+          await redis.del(...keys);
+          totalDeleted += keys.length;
+        }
+      } while (cursor !== '0');
+    }
+
+    if (totalDeleted > 0) {
+      logger.info(`[CACHE] Invalidated ${totalDeleted} cache keys for connection: ${connectionId}`);
     } else {
       logger.debug(`[CACHE] No cache keys found for connection: ${connectionId}`);
     }
@@ -183,11 +198,20 @@ export async function invalidateViewerCache(userId: string, connectionId?: strin
       ? `viewer:${userId}:connection:${connectionId}:*`
       : `viewer:${userId}:*`;
     
-    const keys = await redis.keys(pattern);
-    
-    if (keys.length > 0) {
-      await redis.del(...keys);
-      logger.info(`[CACHE] Invalidated ${keys.length} viewer cache keys for user: ${userId}`);
+    // Non-blocking SCAN instead of O(N) KEYS command
+    let totalDeleted = 0;
+    let cursor = '0';
+    do {
+      const [nextCursor, keys] = await redis.scan(cursor, 'MATCH', pattern, 'COUNT', 100);
+      cursor = nextCursor;
+      if (keys.length > 0) {
+        await redis.del(...keys);
+        totalDeleted += keys.length;
+      }
+    } while (cursor !== '0');
+
+    if (totalDeleted > 0) {
+      logger.info(`[CACHE] Invalidated ${totalDeleted} viewer cache keys for user: ${userId}`);
     }
   } catch (error: any) {
     logger.error(`[CACHE] Error invalidating viewer cache:`, error);

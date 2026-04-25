@@ -1,58 +1,50 @@
-# # This workflow will do a clean installation of node dependencies, cache/restore them, build the source code and run tests across different versions of node
-# # For more information see: https://docs.github.com/en/actions/automating-builds-and-tests/building-and-testing-nodejs
+name: Deploy to EC2 (self-hosted)
 
-# name: self-hosted
+on:
+  push:
+    branches: ["main"]
 
-# on:
-#   push:
-#     branches: [ "main" ]
+jobs:
+  deploy:
+    runs-on: self-hosted
 
-# jobs:
-#   build:
+    steps:
+      # 1. Checkout latest code
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-#     runs-on: self-hosted
+      # 2. Setup Node
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: "npm"
 
-#     strategy:
-#       matrix:
-#         node-version: [22.x]
+      # 3. Install deps
+      - name: Install dependencies
+        run: npm ci
 
-#     steps:
-#     - uses: actions/checkout@v4
-    
-#     - name: Use Node.js ${{ matrix.node-version }}
-#       uses: actions/setup-node@v4
-#       with:
-#         node-version: ${{ matrix.node-version }}
-#         cache: 'npm'
-    
-#     - name: Install dependencies
-#       run: npm i
-    
-#     - name: Create .env file
-#       run: | 
-#         touch .env
-#         echo "${{ secrets.PROD }}" > .env
-    
-#     - name: Build project
-#       run: npm run build --if-present
-    
-#     - name: Install PM2 globally
-#       run: npm i -g pm2
-    
-#     - name: Stop and delete existing PM2 process
-#       run: |
-#         if pm2 describe chatsql > /dev/null 2>&1; then
-#           echo "🛑 Stopping existing chatsql process..."
-#           pm2 stop chatsql
-#           pm2 delete chatsql
-#           echo "✅ Existing process stopped and deleted"
-#         else
-#           echo "ℹ️ No existing chatsql process found"
-#         fi
-    
-#     - name: Start new PM2 process
-#       run: |
-#         echo "🚀 Starting new chatsql process..."
-#         pm2 start dist/server.js --name chatsql
-#         pm2 save
-#         echo "✅ chatsql started successfully"
+      # 4. Create .env file
+      - name: Create .env file
+        run: |
+          echo "${{ secrets.PROD }}" > .env
+
+      # 5. Build project
+      - name: Build project
+        run: npm run build
+
+      # 6. Restart app with PM2
+      - name: Restart PM2 app
+        run: |
+          echo "🚀 Deploying app..."
+
+          if pm2 describe chatsql > /dev/null 2>&1; then
+            echo "🔄 Restarting existing app"
+            pm2 restart chatsql
+          else
+            echo "🆕 Starting new app"
+            pm2 start dist/server.js --name chatsql
+          fi
+
+          pm2 save
+          echo "✅ Deployment successful"

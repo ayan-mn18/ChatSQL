@@ -19,5 +19,5 @@ export type Relationships = {
   table_name: string,
   column_name: string,
   foreign_table_name: string,
-  foreign_column_name: string 
+  foreign_column_name: string
 }
